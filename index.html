@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#171716" />
+    <meta name="description" content="Same city, different dreams. Discover the new streetwear drop from M’LANG." />
+    <title>M’LANG — Same city, different dreams</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600;700&family=Playfair+Display:wght@400;500&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="frontend/styles.css" />
+  </head>
+  <body>
+    <div class="announcement">“Same city, different dreams.” &nbsp;— M’LANG</div>
+    <header class="site-header">
+      <a class="wordmark" href="#home" aria-label="M’LANG home">M’LANG<span>®</span></a>
+      <nav class="main-nav" aria-label="Main navigation">
+        <a href="#products">SHOP</a><a href="#story">ABOUT</a><a href="#contact">CONTACT</a>
+      </nav>
+      <div class="header-actions">
+        <button class="account-toggle" type="button">ACCOUNT</button>
+        <button class="icon-button search-toggle" aria-label="Search products"><svg viewBox="0 0 24 24"><circle cx="10.8" cy="10.8" r="6.5"/><path d="m16 16 5 5"/></svg></button>
+        <button class="icon-button wishlist-toggle" aria-label="Show saved pieces"><svg viewBox="0 0 24 24"><path d="M20.4 8.7c0 5.5-8.4 10.2-8.4 10.2S3.6 14.2 3.6 8.7A4.3 4.3 0 0 1 12 6.8a4.3 4.3 0 0 1 8.4 1.9Z"/></svg><span class="wish-count">0</span></button>
+        <button class="icon-button bag-toggle" aria-label="Open shopping bag"><svg viewBox="0 0 24 24"><path d="M5 8h14l1 13H4L5 8Z"/><path d="M9 9V6a3 3 0 0 1 6 0v3"/></svg><span class="bag-count">0</span></button>
+        <button class="menu-toggle" aria-label="Open menu"><span></span><span></span></button>
+      </div>
+    </header>
+    <main id="home">
+      <section class="hero" aria-label="New drop: Del Stop Crew">
+        <img class="hero-art" src="public/assets/campaign-del-stop.png" alt="Del Stop Crew campaign — same streets, new stories" />
+        <a class="hero-link" href="#products" aria-label="Shop the new drop"></a>
+        <div class="hero-meta"><span>COLLECTION 01 / 2026</span><span>DELHI, INDIA</span></div>
+      </section>
+
+      <section class="collection section-wrap" id="products">
+        <div class="section-heading">
+          <div><p class="eyebrow">THE FIRST DROP · 2026</p><h1>Pieces with a point of view.</h1></div>
+          <p class="section-note">Made for the ones who feel too much,<br />think too much, and still show up.</p>
+        </div>
+        <div class="collection-toolbar">
+          <div class="filters" role="group" aria-label="Filter products">
+            <button class="filter active" data-filter="all">ALL PIECES <span id="pieces-count">05</span></button>
+            <button class="filter" data-filter="white">WHITE TEES</button>
+            <button class="filter" data-filter="black">BLACK TEES</button>
+          </div>
+          <div class="toolbar-right"><span class="catalog-disclaimer">PRICES IN INR</span><label class="sort-control"><span>SORT</span><select id="sort-products" aria-label="Sort products"><option value="featured">FEATURED</option><option value="price-low">PRICE: LOW TO HIGH</option><option value="price-high">PRICE: HIGH TO LOW</option><option value="name">NAME: A TO Z</option></select></label></div>
+        </div>
+        <div class="product-grid" id="product-grid"></div>
+      </section>
+
+      <section class="story" id="story">
+        <img src="public/assets/malang-story.png" alt="M’LANG story: more than just tees, built on real stories and the chaos of everyday life" />
+        <div class="story-mobile-copy"><p class="eyebrow">OUR STORY</p><h2>More than just tees.</h2><p>M’LANG is a streetwear label built on real stories, raw emotions and the chaos of everyday life. We create T-shirts for the ones who feel too much, think too much, and still show up.</p></div>
+      </section>
+
+      <section class="manifesto" id="about"><p>“Same city, different dreams.”</p><span>— M’LANG</span></section>
+      <section class="contact section-wrap" id="contact">
+        <div class="section-heading"><div><p class="eyebrow">THE MALANG COMPANY · CUSTOMER CARE</p><h2>Return, Refund<br />&amp; Exchange Policy</h2></div><p class="section-note">THE MALANG COMPANY<br />(म’LANG)</p></div>
+        <article class="policy-document">
+          <p>At THE MALANG COMPANY, we take care to deliver your orders in good condition. Please read our Return, Refund &amp; Exchange Policy before placing an order.</p>
+          <h3>1. No Return or Refund Policy</h3>
+          <ul><li>All sales are final for products received in good condition.</li><li>We do not accept returns or provide refunds for products that are delivered in good condition.</li><li>Monetary refunds are not offered, including in cases where a product is received damaged.</li><li>Exchanges are permitted only in the case of a product received in damaged condition, subject to verification.</li></ul>
+          <h3>2. Exchange for Damaged Products</h3>
+          <p>If you receive a damaged product, you may request an exchange by following these steps:</p>
+          <ul><li>Contact us using the email address or phone/WhatsApp number provided below.</li><li>Share your order details and clear photographs or videos showing the damage.</li><li>Our team will review your request and verify the reported damage.</li><li>Once approved, the damaged product may be exchanged for a replacement, subject to stock availability and verification.</li><li>No monetary refund will be provided. The resolution for an eligible damaged product will be an exchange rather than a refund.</li></ul>
+          <p>Please inspect your order upon delivery and contact us promptly if you discover any damage.</p>
+          <h3>3. Products Not Eligible for Exchange</h3>
+          <ul><li>Products received in good condition are not eligible for returns, refunds or exchanges under our standard policy.</li><li>Requests based solely on a change of mind, personal preference or dissatisfaction with the product when it has arrived in good condition are not eligible for an exchange under this policy.</li></ul>
+          <p>This policy is subject to applicable consumer protection laws and statutory rights.</p>
+          <h3>4. Contact Us</h3>
+          <p>For order-related enquiries or to request an exchange for a damaged product, please contact us directly through either of the following channels:</p>
+          <ul class="policy-contact"><li>Email: <a href="mailto:themalangverse@gmail.com">themalangverse@gmail.com</a></li><li>Phone / WhatsApp: <a href="https://wa.me/919810346168" target="_blank" rel="noreferrer">+91 98103 46168</a></li></ul>
+          <p>We do not have a separate customer support portal or dedicated support channel. All customer enquiries and damaged-product exchange requests must be sent to the email address or mobile number listed above.</p>
+          <p>When contacting us about a damaged product, please include your order details and clear photographs or videos of the damage to help us review your request.</p>
+          <p class="policy-signoff"><strong>THE MALANG COMPANY</strong><br />Website: <a href="https://themalangverse.com" target="_blank" rel="noreferrer">https://themalangverse.com</a><br /><br />Thank you for choosing Malang.</p>
+        </article>
+      </section>
+      <section class="newsletter"><div><p class="eyebrow">STAY IN THE LOOP</p><h2>Notes from the city.</h2></div><form id="newsletter-form"><label for="email">DROP YOUR EMAIL FOR THE NEXT DROP</label><div class="email-row"><input id="email" type="email" placeholder="your@email.com" required /><button type="submit" aria-label="Subscribe">↗</button></div><small id="newsletter-status">No noise. Just the good stuff.</small></form></section>
+    </main>
+    <footer class="site-footer"><div><a class="wordmark footer-logo" href="#home">M’LANG<span>®</span></a><p>Same city, different dreams.<br />© 2026 M’LANG. All rights reserved.</p></div><div class="footer-links"><a href="#products">SHOP</a><a href="#story">ABOUT</a><a href="#contact">CONTACT US</a><a href="#orders" class="orders-toggle">MY DEMO ORDERS</a><a href="#">INSTAGRAM ↗</a></div></footer>
+
+    <div class="overlay" id="overlay"></div>
+    <aside class="cart-drawer" id="cart-drawer" aria-label="Shopping bag" aria-hidden="true">
+      <div class="drawer-head"><div><p class="eyebrow">YOUR BAG</p><h2>Good choice<span class="cart-total-count"></span></h2></div><button class="close-button" aria-label="Close shopping bag">×</button></div>
+      <div class="cart-items" id="cart-items"></div>
+      <div class="cart-empty" id="cart-empty"><p>THE CART IS EMPTY</p><a href="#products" class="dark-button empty-cart-link">FIND YOUR PIECE <span>↗</span></a></div>
+      <div class="cart-foot" id="cart-foot"><div><span>SUBTOTAL</span><strong id="cart-subtotal">₹0</strong></div><p id="shipping-hint">Shipping calculated at checkout.</p><button class="checkout-button">CHECK OUT <span>↗</span></button></div>
+    </aside>
+    <section class="product-modal" id="product-modal" aria-label="Product details" aria-hidden="true"><button class="close-button modal-close" aria-label="Close product details">×</button><div id="product-detail"></div></section>
+    <section class="checkout-modal" id="checkout-modal" aria-label="Checkout" aria-hidden="true"></section>
+    <div class="toast" id="toast" role="status"></div>
+    <script type="module" src="frontend/app.js"></script>
+  </body>
+</html>

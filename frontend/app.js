@@ -1,0 +1,221 @@
+import { PRODUCTS as PRODUCT_CATALOG, PRODUCT_SIZES, TEE_SIZE_CHART } from '../shared/catalog.js';
+
+// Shared helpers and DOM references.
+const asset = name => `public/assets/${name}`;
+const money = value => `₹${Math.round(value).toLocaleString('en-IN')}`;
+const escapeHtml = value => String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const readStore = (key, fallback) => { try { const value=JSON.parse(localStorage.getItem(key)); return value ?? fallback; } catch { return fallback; } };
+const writeStore = (key, value) => { try { localStorage.setItem(key,JSON.stringify(value)); } catch { showToast('BROWSER STORAGE IS UNAVAILABLE'); } };
+const productGrid=document.querySelector('#product-grid'), pageOverlay=document.querySelector('#overlay');
+const cartDrawer=document.querySelector('#cart-drawer'), productDetailsPanel=document.querySelector('#product-modal'), checkoutPanel=document.querySelector('#checkout-modal');
+const storedCart=readStore('mlang-cart',[]),storedFavorites=readStore('mlang-favorites',[]);
+let cart=(Array.isArray(storedCart)?storedCart:[]).filter(item=>item&&PRODUCT_CATALOG.some(p=>p.id===item.id)&&PRODUCT_SIZES.includes(item.size)&&Number.isInteger(item.qty)&&item.qty>0).map(item=>({...item,qty:Math.min(item.qty,5)}));
+let favorites=new Set((Array.isArray(storedFavorites)?storedFavorites:[]).filter(id=>PRODUCT_CATALOG.some(p=>p.id===id)));
+let activeFilter='all', searchQuery='', sortMode='featured', savedView=false, appliedCoupon='';
+let paymentSettings={razorpayEnabled:false,keyId:null,shiprocketEnabled:false,emailEnabled:false,databaseEnabled:false},isPaymentInProgress=false,currentAccount=null,accountEmail='';
+let toastTimer;
+const persistCart=()=>writeStore('mlang-cart',cart);
+const getProductById=id=>PRODUCT_CATALOG.find(product=>product.id===id);
+cart=cart.reduce((normalized,item)=>{const product=getProductById(item.id),used=normalized.reduce((sum,current)=>sum+(current.id===item.id?current.qty:0),0),available=Math.max(0,product.stock-used),qty=Math.min(item.qty,available);if(qty)normalized.push({...item,qty});return normalized;},[]);
+const totalUnits=()=>cart.reduce((sum,item)=>sum+item.qty,0);
+const subtotal=()=>cart.reduce((sum,item)=>sum+getProductById(item.id).price*item.qty,0);
+const discount=()=>appliedCoupon==='WELCOME10'?Math.round(subtotal()*.1):0;
+const shipping=()=>subtotal()-discount()>=3000||subtotal()===0?0:99;
+
+// Product grid, favorites, cart contents, and product details.
+function renderProducts(){
+  let list=PRODUCT_CATALOG.filter(p=>(activeFilter==='all'||p.color===activeFilter)&&p.name.toLowerCase().includes(searchQuery.toLowerCase())&&(!savedView||favorites.has(p.id)));
+  if(sortMode==='price-low')list.sort((a,b)=>a.price-b.price); else if(sortMode==='price-high')list.sort((a,b)=>b.price-a.price); else if(sortMode==='name')list.sort((a,b)=>a.name.localeCompare(b.name));
+  productGrid.innerHTML='';
+  for(const p of list){
+    const card=document.createElement('article');card.className='product-card';card.dataset.id=p.id;
+    card.innerHTML=`<div class="product-image-wrap"><img class="product-image" src="${asset(p.images[0])}" alt="${p.name}" loading="lazy"><button class="quick-add" data-quick="${p.id}">VIEW PIECE <span>↗</span></button><button class="favorite-button ${favorites.has(p.id)?'is-favorite':''}" data-favorite="${p.id}" aria-label="${favorites.has(p.id)?'Remove from':'Add to'} saved pieces">${favorites.has(p.id)?'♥':'♡'}</button></div><div class="product-meta"><div><p class="product-name">${p.name}</p><p class="product-price">${money(p.price)}</p><p class="product-stock">${p.stock} pieces in stock</p></div><div class="product-swatch" aria-label="${p.color} color"><i class="${p.color==='black'?'dark':''}"></i></div></div>`;
+    productGrid.append(card);
+  }
+  if(!list.length)productGrid.innerHTML=`<p class="no-results">${savedView?'NO SAVED PIECES YET. TAP ♡ TO SAVE ONE.':'NO PIECES FOUND. TRY ANOTHER SEARCH.'}</p>`;
+  document.querySelector('#pieces-count').textContent=String(list.length).padStart(2,'0');
+  document.querySelector('.collection-heading-label').textContent=savedView?'YOUR SAVED PIECES':'THE FIRST DROP · 2026';
+  document.querySelectorAll('.filter').forEach(button=>button.classList.toggle('active',!savedView&&button.dataset.filter===activeFilter));
+}
+function updateHeader(){
+  document.querySelector('.bag-count').textContent=totalUnits();
+  document.querySelector('.wish-count').textContent=favorites.size;
+  document.querySelector('.cart-total-count').textContent=`(${totalUnits()})`;
+}
+function showToast(message){const el=document.querySelector('#toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),2400);}
+function closePanels(){pageOverlay.classList.remove('open');for(const panel of [cartDrawer,productDetailsPanel,checkoutPanel]){panel.classList.remove('open');panel.setAttribute('aria-hidden','true');}document.body.classList.remove('locked');}
+function openPanel(panel){closePanels();pageOverlay.classList.add('open');panel.classList.add('open');panel.setAttribute('aria-hidden','false');document.body.classList.add('locked');}
+function addToCart(product,size){
+  const productUnits=cart.reduce((sum,item)=>sum+(item.id===product.id?item.qty:0),0);
+  if(productUnits>=product.stock){showToast(`ONLY ${product.stock} PIECES IN STOCK`);return;}
+  const existing=cart.find(item=>item.id===product.id&&item.size===size);
+  if(existing){if(existing.qty>=5){showToast('MAXIMUM 5 PER SIZE');return;}existing.qty++;}else cart.push({id:product.id,size,qty:1});
+  persistCart();renderCart();closePanels();showToast(`${product.name} · ${size} ADDED TO YOUR BAG`);
+}
+function renderCart(){
+  const items=document.querySelector('#cart-items'),empty=document.querySelector('#cart-empty'),foot=document.querySelector('#cart-foot');
+  items.innerHTML=cart.map((item,index)=>{const p=getProductById(item.id),otherUnits=cart.reduce((sum,current,i)=>sum+(i!==index&&current.id===item.id?current.qty:0),0),maxQuantity=Math.min(5,p.stock-otherUnits);return `<div class="cart-item"><img src="${asset(p.images[0])}" alt="${p.name}"><div><h3>${p.name}</h3><p>${money(p.price)} · ${item.size}</p><label class="quantity-label">QTY <select data-qty="${index}" aria-label="Quantity for ${p.name}">${Array.from({length:maxQuantity},(_,i)=>i+1).map(n=>`<option value="${n}" ${item.qty===n?'selected':''}>${n}</option>`).join('')}</select></label></div><button class="remove-item" data-remove="${index}">REMOVE</button></div>`;}).join('');
+  empty.style.display=cart.length?'none':'flex';foot.classList.toggle('visible',!!cart.length);
+  document.querySelector('#cart-subtotal').textContent=money(subtotal());
+  document.querySelector('#shipping-hint').textContent=subtotal()>=3000?'You qualify for free shipping.':'Add '+money(Math.max(0,3000-subtotal()))+' for free shipping.';
+  updateHeader();
+}
+function showProduct(product){
+  const chartRows = TEE_SIZE_CHART.map(({ size, chest, length, shoulder, sleeve }) => `<tr><th>${size}</th><td>${chest}</td><td>${length}</td><td>${shoulder}</td><td>${sleeve}</td></tr>`).join('');
+  document.querySelector('#product-detail').innerHTML=`<div class="detail-layout"><div class="detail-gallery gallery-count-${product.images.length}">${product.images.map((img,i)=>`<img src="${asset(img)}" alt="${product.name} — view ${i+1}" ${i>1?'loading="lazy"':''}>`).join('')}</div><div class="detail-info"><p class="eyebrow">M’LANG · THE FIRST DROP</p><h2>${product.name}</h2><p class="detail-price">${money(product.price)} <span>· INCLUSIVE OF TAXES</span></p><p class="detail-description">${product.description}</p><p class="detail-description">${product.fit}</p><div class="size-label"><span>SELECT SIZE</span><button class="size-guide" aria-expanded="false" aria-controls="size-chart">SIZE GUIDE ↗</button></div><div class="sizes">${PRODUCT_SIZES.map((size,i)=>`<button class="size-option ${i===1?'selected':''}" data-size="${size}">${size}</button>`).join('')}</div><section class="size-chart" id="size-chart" hidden><h3>TEE SIZE CHART <span>CM</span></h3><div class="size-chart-scroll"><table><thead><tr><th>SIZE</th><th>CHEST CIRC.</th><th>LENGTH</th><th>SHOULDER</th><th>SLEEVE</th></tr></thead><tbody>${chartRows}</tbody></table></div><p>Measurements are approximate garment measurements. For the best fit, compare with a tee you own. Allow 1–2 cm variation.</p></section><button class="add-to-bag" data-add="${product.id}">ADD TO BAG <span>${money(product.price)} &nbsp; ↗</span></button><p class="detail-note">100% cotton · Designed in Delhi<br>Easy care · Refer to the size guide before ordering</p></div></div>`;
+  openPanel(productDetailsPanel);
+}
+// Checkout preview, payment processing, and saved order history.
+function renderCheckout(){
+  const paymentMode=paymentSettings.mode==='live'?'live':paymentSettings.mode==='test'?'test':'unconfigured',paymentLabel=paymentMode==='live'?'LIVE MODE':paymentMode==='test'?'TEST MODE':'NOT CONFIGURED',paymentButtonLabel=paymentMode==='live'?'PAY SECURELY WITH RAZORPAY':paymentMode==='test'?'PAY WITH RAZORPAY TEST MODE':'RAZORPAY NOT CONFIGURED';
+  checkoutPanel.innerHTML=`<button class="close-button checkout-close" aria-label="Close checkout">×</button><div class="checkout-inner"><div class="checkout-title"><p class="eyebrow">M’LANG · SECURE CHECKOUT</p><h2>Complete your order.</h2><p>Online payment needs an account. Cash on delivery is available without sign-in.</p></div><form id="checkout-form" novalidate><div class="checkout-columns"><div class="checkout-fields"><fieldset><legend>CONTACT</legend><label>Email address<input name="email" type="email" autocomplete="email" value="${escapeHtml(currentAccount?.email||'')}" ${currentAccount?'readonly':''} required></label><label>Phone number<input name="phone" type="tel" autocomplete="tel" inputmode="numeric" pattern="[0-9+ ()-]{8,16}" required></label></fieldset><fieldset><legend>DELIVERY ADDRESS</legend><label>Full name<input name="name" autocomplete="name" value="${escapeHtml(currentAccount?.name||'')}" required></label><label>Address<input name="address" autocomplete="street-address" required></label><div class="field-row"><label>City<input name="city" autocomplete="address-level2" required></label><label>State<input name="state" autocomplete="address-level1" required></label></div><div class="field-row"><label>PIN code<input name="pincode" autocomplete="postal-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label><label>Country<select name="country" required><option value="India">India</option></select></label></div></fieldset><fieldset><legend>PAYMENT</legend><div class="payment-choice"><span>RAZORPAY HOSTED CHECKOUT</span><strong>${paymentLabel}</strong></div><p class="form-note" id="razorpay-status">Checking payment configuration…</p><p class="form-note">Cash on delivery · Pay the courier when your order arrives.</p></fieldset><label class="policy-consent"><input type="checkbox" name="policyConsent" required> I have read and acknowledge the <a href="#contact" target="_blank" rel="noreferrer">Return, Refund &amp; Exchange Policy</a>.</label>${paymentMode==='test'?'<label class="demo-consent"><input type="checkbox" name="demoConsent"> I understand this uses test mode, so no real payment will be taken.</label>':''}<p class="form-error" id="checkout-error" role="alert"></p><button class="place-order razorpay-button" type="button" data-start-payment disabled>${paymentButtonLabel} <span>↗</span></button><button class="demo-order-button cod-order-button" type="button" data-start-cod>PLACE COD ORDER · PAY ON DELIVERY</button><button class="demo-order-button" type="submit">CREATE A DEMO ORDER WITHOUT PAYMENT</button></div><aside class="order-summary"><p class="eyebrow">ORDER SUMMARY · ${totalUnits()} ITEM${totalUnits()===1?'':'S'}</p><div class="checkout-items">${cart.map(item=>{const p=getProductById(item.id);return `<div class="checkout-item"><img src="${asset(p.images[0])}" alt=""><span>${p.name} · ${item.size} × ${item.qty}</span><strong>${money(p.price*item.qty)}</strong></div>`;}).join('')}</div><div class="coupon-form" id="coupon-form"><label for="coupon">DISCOUNT CODE</label><div><input id="coupon" name="coupon" placeholder="Enter code" value="${appliedCoupon}"><button type="button" data-apply-coupon>APPLY</button></div><small id="coupon-message">${appliedCoupon?'WELCOME10 applied':'Try WELCOME10 for 10% off.'}</small></div><div class="summary-lines"><p><span>Subtotal</span><span>${money(subtotal())}</span></p><p><span>Discount</span><span>− ${money(discount())}</span></p><p><span>Shipping</span><span>${shipping()===0?'FREE':money(shipping())}</span></p><p class="summary-total"><span>Total</span><strong>${money(subtotal()-discount()+shipping())}</strong></p></div><p class="form-note">Taxes included in item prices. Shipping is a preview estimate.</p></aside></div></form></div>`;
+  openPanel(checkoutPanel);updatePaymentControls();
+}
+function showOrderConfirmation(order){
+  const shippingMessage=order.shipping?.status==='booked'?`Shiprocket shipment booked · AWB ${order.shipping.awb}.`:order.shipping?.status==='pending_setup'?'Shiprocket booking is pending API credentials, pickup location, and parcel dimensions in .env.':'Shiprocket could not book this shipment yet; check the admin order record for the carrier response.';
+  const emailMessage=order.emailStatus==='sent'?'Order confirmation email sent.':order.emailStatus==='pending_setup'?'Email receipt is pending mail provider setup in .env.':'Email receipt could not be sent; you can see this order in your account.';
+  checkoutPanel.innerHTML=`<div class="order-confirmation"><p class="eyebrow">${order.paymentMethod==='COD'?'COD ORDER RECEIVED':order.paid?`RAZORPAY ${String(order.mode||paymentSettings.mode||'test').toUpperCase()} PAYMENT VERIFIED`:'DEMO ORDER CREATED'}</p><div class="confirmation-mark">✓</div><h2>Thanks, ${escapeHtml(order.name.split(' ')[0])}.</h2><p>Your order number is <strong>${escapeHtml(order.number)}</strong>.</p><p class="confirmation-note">${order.paymentMethod==='COD'?`Pay ${money(order.total)} to the courier on delivery. ${escapeHtml(shippingMessage)} ${emailMessage}`:order.paid?`Your payment was verified. ${escapeHtml(shippingMessage)} ${emailMessage}`:'No payment was taken and nothing will be shipped. This demo receipt is saved in this browser.'}</p><div class="confirmation-receipt"><span>${order.items} item${order.items===1?'':'s'}</span><strong>${money(order.total)}</strong></div><button class="place-order" id="continue-shopping">CONTINUE SHOPPING <span>↗</span></button></div>`;
+  checkoutPanel.querySelector('#continue-shopping').addEventListener('click',()=>{closePanels();window.location.hash='products';});
+}
+function updatePaymentControls(){
+  const button=checkoutPanel.querySelector('[data-start-payment]'),status=checkoutPanel.querySelector('#razorpay-status');
+  if(!button||!status)return;
+  button.disabled=!paymentSettings.razorpayEnabled||!currentAccount||isPaymentInProgress;
+  const codButton=checkoutPanel.querySelector('[data-start-cod]');if(codButton)codButton.disabled=isPaymentInProgress;
+  const storageMessage=paymentSettings.databaseEnabled?'Supabase order storage is connected.':'Supabase is not connected; orders stay on this computer.';
+  status.textContent=(!currentAccount?'Sign in for online payment and account tracking. You can place a COD order without an account.':paymentSettings.razorpayEnabled?`Razorpay ${String(paymentSettings.mode||'test').toUpperCase()} Mode is ready. ${paymentSettings.shiprocketEnabled?'Shiprocket booking runs after payment.':'Shiprocket booking needs API user credentials, a configured pickup location, and parcel dimensions in .env.'} ${paymentSettings.emailEnabled?'Email receipts are enabled.':'Email receipts need Resend sender credentials in .env.'}`:'Razorpay is not configured. Add the matching Key ID and Key Secret to .env. The no-payment demo order still works.')+' '+storageMessage;
+}
+async function loadPaymentConfig(){
+  try{const [configResponse,accountResponse]=await Promise.all([fetch('/api/config'),fetch('/api/auth/me')]);if(configResponse.ok)paymentSettings=await configResponse.json();if(accountResponse.ok)currentAccount=(await accountResponse.json()).user;updateAccountButton();updatePaymentControls();}
+  catch{updatePaymentControls();}
+}
+function updateAccountButton(){const button=document.querySelector('.account-toggle');button.textContent=currentAccount?(currentAccount.role==='admin'?'ADMIN · ':'ACCOUNT · ')+currentAccount.name.split(' ')[0].toUpperCase():'ACCOUNT';button.setAttribute('aria-label',currentAccount?`${currentAccount.role==='admin'?'Admin':'Account'} for ${currentAccount.name}`:'Sign in or create account');}
+function accountForm(mode){accountEmail=mode==='verify'?accountEmail:'';const title=mode==='register'?'Create your account':mode==='verify'?'Check your email':'Welcome back';const fields=mode==='register'?'<label>Full name<input name="name" autocomplete="name" required minlength="2"></label><label>Email address<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="128"></label>':mode==='verify'?`<p class="form-note">We sent a 6-digit code to ${escapeHtml(accountEmail)}. It expires in 10 minutes.</p><input type="hidden" name="email" value="${escapeHtml(accountEmail)}"><label>Verification code<input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" required></label>`:'<label>Email address<input name="email" type="email" autocomplete="email" required></label><label>Password<input name="password" type="password" autocomplete="current-password" required maxlength="128"></label>';checkoutPanel.innerHTML=`<button class="close-button checkout-close" aria-label="Close account">×</button><div class="account-panel"><p class="eyebrow">M’LANG · CUSTOMER ACCOUNT</p><h2>${title}</h2><form id="account-form" data-mode="${mode}" novalidate>${fields}<p class="form-error" id="account-error" role="alert"></p><button class="place-order" type="submit">${mode==='verify'?'VERIFY EMAIL':'CONTINUE'} <span>↗</span></button></form><p class="form-note account-switch">${mode==='login'?`New here? <button type="button" data-account-mode="register">CREATE ACCOUNT</button>`:mode==='register'?`Already have an account? <button type="button" data-account-mode="login">SIGN IN</button>`:''}</p></div>`;openPanel(checkoutPanel);}
+async function openAccount(){if(currentAccount){await renderAccountOrders();return;}accountForm('login');}
+async function renderAccountOrders(){if(currentAccount.role==='admin'){await renderAdminOrders();return;}checkoutPanel.innerHTML='<button class="close-button checkout-close" aria-label="Close account">×</button><div class="account-panel"><p class="eyebrow">M’LANG · CUSTOMER ACCOUNT</p><h2>Hi, <span class="account-name"></span>.</h2><p class="form-note account-email"></p><div class="account-orders-list"><p class="form-note">Loading your orders…</p></div><button class="demo-order-button" type="button" data-account-logout>SIGN OUT</button></div>';checkoutPanel.querySelector('.account-name').textContent=currentAccount.name.split(' ')[0];checkoutPanel.querySelector('.account-email').textContent=currentAccount.email;openPanel(checkoutPanel);const list=checkoutPanel.querySelector('.account-orders-list');try{const response=await fetch('/api/account/orders'),data=await response.json();if(!response.ok)throw new Error(data.error||'Could not load orders.');list.innerHTML='';if(!data.orders.length){const empty=document.createElement('p');empty.className='form-note';empty.textContent='No orders yet.';list.append(empty);}for(const order of data.orders){const row=document.createElement('article');row.className='account-order';const title=document.createElement('strong');title.textContent=order.id;const details=document.createElement('p');details.textContent=`${order.itemCount} item${order.itemCount===1?'':'s'} · ${money(order.total)} · ${new Date(order.createdAt).toLocaleDateString('en-IN')}`;const shipment=document.createElement('p');shipment.textContent=order.shipping.awb?`Shiprocket AWB ${order.shipping.awb}`:`Shipment: ${order.shipping.status}`;row.append(title,details,shipment);if(order.shipping.awb){const track=document.createElement('button');track.type='button';track.className='tracking-button';track.textContent='TRACK SHIPMENT';track.dataset.trackOrder=order.id;const timeline=document.createElement('div');timeline.className='tracking-timeline';row.append(track,timeline);}list.append(row);}}catch(error){list.textContent=error.message;}}
+async function renderAdminOrders(){checkoutPanel.innerHTML='<button class="close-button checkout-close" aria-label="Close admin panel">×</button><div class="account-panel admin-panel"><p class="eyebrow">THE MALANG COMPANY · ADMIN</p><h2>All orders.</h2><p class="form-note">Signed in as <span class="admin-email"></span></p><button class="tracking-button" type="button" data-refresh-admin>REFRESH ORDERS</button><div class="admin-orders-list"><p class="form-note">Loading orders…</p></div><button class="demo-order-button" type="button" data-account-logout>SIGN OUT</button></div>';checkoutPanel.querySelector('.admin-email').textContent=currentAccount.email;openPanel(checkoutPanel);const list=checkoutPanel.querySelector('.admin-orders-list');try{const response=await fetch('/api/admin/orders'),data=await response.json();if(!response.ok)throw new Error(data.error||'Could not load store orders.');list.innerHTML='';if(!data.orders.length){const empty=document.createElement('p');empty.className='form-note';empty.textContent='No orders yet.';list.append(empty);}for(const order of data.orders){const row=document.createElement('article');row.className='admin-order';const title=document.createElement('strong');title.textContent=`${order.id} · ${money(order.total)} · ${order.status}`;const date=document.createElement('p');date.textContent=new Date(order.createdAt).toLocaleString('en-IN');const customer=document.createElement('p');customer.textContent=`${order.customer.name||'Customer'} · ${order.customer.email||''} · ${order.customer.phone||''}`;const address=document.createElement('p');address.textContent=[order.customer.address,order.customer.city,order.customer.state,order.customer.pincode].filter(Boolean).join(', ');const products=document.createElement('p');products.textContent=order.items.map(item=>`${item.name} · ${item.size} × ${item.qty} (${money(item.lineTotal||item.unitPrice*item.qty)})`).join(' | ');const payment=document.createElement('p');payment.textContent=`Payment: ${order.paymentMethod||'Prepaid'}`;const shipping=document.createElement('p');shipping.textContent=`Shiprocket: ${order.shipping.status}${order.shipping.awb?` · AWB ${order.shipping.awb}`:''}`;const mail=document.createElement('p');mail.textContent=`Receipt email: ${order.emailStatus}`;row.append(title,date,customer,address,products,payment,shipping,mail);list.append(row);}}catch(error){list.textContent=error.message;}}
+async function trackAccountOrder(button){button.disabled=true;const timeline=button.parentElement.querySelector('.tracking-timeline');timeline.textContent='Loading Shiprocket updates…';try{const response=await fetch(`/api/account/orders/${encodeURIComponent(button.dataset.trackOrder)}/tracking`),data=await response.json();if(!response.ok)throw new Error(data.error||'Tracking is unavailable.');timeline.innerHTML='';const status=document.createElement('strong');status.textContent=data.status||'Tracking update';timeline.append(status);for(const event of data.timeline||[]){const item=document.createElement('p');item.textContent=[event.time,event.location,event.status].filter(Boolean).join(' · ');timeline.append(item);}if(!data.timeline?.length){const note=document.createElement('p');note.textContent=data.message||'No carrier scan has been posted yet.';timeline.append(note);}}catch(error){timeline.textContent=error.message;}finally{button.disabled=false;}}
+function loadRazorpaySdk(){
+  if(window.Razorpay)return Promise.resolve();
+  return new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='https://checkout.razorpay.com/v1/checkout.js';script.onload=resolve;script.onerror=()=>reject(new Error('Could not load Razorpay Checkout. Check your internet connection and retry.'));document.head.append(script);});
+}
+async function startRazorpayPayment(){
+  const form=document.querySelector('#checkout-form'),error=document.querySelector('#checkout-error');
+  if(!form||!form.reportValidity())return;
+  if(paymentSettings.mode==='test'&&!form.querySelector('[name=demoConsent]')?.checked){document.querySelector('#checkout-error').textContent='Confirm that this is a Razorpay test payment.';return;}
+  if(!paymentSettings.razorpayEnabled){error.textContent='Razorpay is not configured for this environment. Use the local demo order button or configure .env.';return;}
+  isPaymentInProgress=true;updatePaymentControls();error.textContent='';
+  try{
+    const values=new FormData(form),customer={name:values.get('name'),email:values.get('email'),phone:values.get('phone'),address:values.get('address'),city:values.get('city'),state:values.get('state'),pincode:values.get('pincode')};
+    const orderResponse=await fetch('/api/razorpay/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart,coupon:appliedCoupon,customer,policyAccepted:values.get('policyConsent')==='on'})});
+    const order=await orderResponse.json();if(!orderResponse.ok)throw new Error(order.error||'Could not prepare your Razorpay order.');
+    await loadRazorpaySdk();
+    const checkout=new window.Razorpay({key:order.keyId,amount:order.amount,currency:order.currency,name:'M’LANG',description:'M’LANG streetwear order',order_id:order.orderId,prefill:{name:customer.name,email:customer.email,contact:customer.phone},theme:{color:'#171716'},modal:{ondismiss:()=>{isPaymentInProgress=false;updatePaymentControls();}},handler:async response=>{
+      try{
+        const verified=await fetch('/api/razorpay/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({...response,customer})});
+        const result=await verified.json();if(!verified.ok)throw new Error(result.error||'Payment verification failed.');
+        const receipt={number:result.order.id,items:result.order.itemCount,total:result.order.total,createdAt:new Date().toISOString(),paid:true,mode:order.mode,shipping:result.order.shipping};
+        const previous=readStore('mlang-demo-orders',[]),orders=Array.isArray(previous)?previous:[];orders.unshift(receipt);writeStore('mlang-demo-orders',orders.slice(0,20));
+        cart=[];persistCart();appliedCoupon='';isPaymentInProgress=false;renderCart();showOrderConfirmation({...receipt,name:customer.name,paid:true});
+      }catch(failure){isPaymentInProgress=false;error.textContent=failure.message;updatePaymentControls();}
+    }});
+    checkout.on('payment.failed',response=>{error.textContent=response?.error?.description||'Payment failed. Please retry or use another payment method.';isPaymentInProgress=false;updatePaymentControls();});
+    checkout.open();
+  }catch(failure){error.textContent=failure.message;isPaymentInProgress=false;updatePaymentControls();}
+}
+async function startCodOrder(){
+  const form=document.querySelector('#checkout-form'),error=document.querySelector('#checkout-error'),button=checkoutPanel.querySelector('[data-start-cod]');
+  if(!form||!form.reportValidity())return;
+  if(!cart.length){error.textContent='Your bag is empty.';return;}
+  isPaymentInProgress=true;button.disabled=true;error.textContent='';
+  try{
+    const values=new FormData(form),customer={name:values.get('name'),email:values.get('email'),phone:values.get('phone'),address:values.get('address'),city:values.get('city'),state:values.get('state'),pincode:values.get('pincode')};
+    const response=await fetch('/api/orders/cod',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart,coupon:appliedCoupon,customer,policyAccepted:values.get('policyConsent')==='on'})});
+    const result=await response.json();if(!response.ok)throw new Error(result.error||'Could not place your COD order.');
+    const receipt=result.order;cart=[];persistCart();appliedCoupon='';isPaymentInProgress=false;renderCart();showOrderConfirmation({number:receipt.id,items:receipt.itemCount,total:receipt.total,name:customer.name,paymentMethod:'COD',shipping:receipt.shipping,emailStatus:receipt.emailStatus});
+  }catch(failure){error.textContent=failure.message;isPaymentInProgress=false;button.disabled=false;}
+}
+function showOrderHistory(){
+  checkoutPanel.innerHTML='<button class="close-button checkout-close" aria-label="Close order history">×</button><div class="checkout-inner history-inner"><p class="eyebrow">THIS BROWSER · PREVIEW RECEIPTS</p><h2 class="history-title">Your demo orders.</h2><p class="form-note">These receipts are saved only in this browser. They are not real purchases.</p><div class="order-history-list"></div></div>';
+  const list=checkoutPanel.querySelector('.order-history-list');
+  const stored=readStore('mlang-demo-orders',[]),orders=Array.isArray(stored)?stored:[];
+  if(!orders.length){const empty=document.createElement('p');empty.className='history-empty';empty.textContent='NO DEMO ORDERS YET.';list.append(empty);}
+  orders.forEach(order=>{
+    if(!order||typeof order.number!=='string'||!Number.isFinite(order.total)||!Number.isInteger(order.items))return;
+    const row=document.createElement('article');row.className='history-order';
+    const title=document.createElement('strong');title.textContent=order.number;
+    const details=document.createElement('span');details.textContent=`${order.items} item${order.items===1?'':'s'} · ${money(order.total)}`;
+    const date=document.createElement('small');date.textContent=Number.isFinite(Date.parse(order.createdAt))?new Date(order.createdAt).toLocaleDateString('en-IN'):'Saved locally';
+    row.append(title,details,date);list.append(row);
+  });
+  openPanel(checkoutPanel);
+}
+function openSearch(){
+  let panel=document.querySelector('.search-panel');
+  if(!panel){panel=document.createElement('div');panel.className='search-panel';panel.innerHTML='<input class="search-input" type="search" placeholder="Find your piece…" aria-label="Search products"><button class="search-close" aria-label="Close search">×</button>';document.querySelector('.site-header').after(panel);panel.querySelector('input').addEventListener('input',event=>{searchQuery=event.target.value.trim();savedView=false;renderProducts();document.querySelector('#products').scrollIntoView({behavior:'smooth'});});panel.querySelector('button').addEventListener('click',()=>{panel.classList.remove('open');panel.querySelector('input').value='';searchQuery='';renderProducts();});}
+  panel.classList.toggle('open');if(panel.classList.contains('open'))panel.querySelector('input').focus();
+}
+
+// Page event handlers and initial UI render.
+document.querySelector('.collection .eyebrow').classList.add('collection-heading-label');
+document.querySelector('.filters').addEventListener('click',event=>{const button=event.target.closest('.filter');if(!button)return;savedView=false;activeFilter=button.dataset.filter;renderProducts();});
+document.querySelector('#sort-products').addEventListener('change',event=>{sortMode=event.target.value;renderProducts();});
+productGrid.addEventListener('click',event=>{
+  const fav=event.target.closest('[data-favorite]');
+  if(fav){const id=fav.dataset.favorite;if(favorites.has(id))favorites.delete(id);else favorites.add(id);writeStore('mlang-favorites',[...favorites]);updateHeader();renderProducts();return;}
+  const quick=event.target.closest('[data-quick]');if(quick){showProduct(getProductById(quick.dataset.quick));return;}
+  const card=event.target.closest('.product-card');if(card)showProduct(getProductById(card.dataset.id));
+});
+document.querySelector('.wishlist-toggle').addEventListener('click',()=>{savedView=!savedView;activeFilter='all';searchQuery='';renderProducts();document.querySelector('#products').scrollIntoView({behavior:'smooth'});});
+document.querySelector('.bag-toggle').addEventListener('click',()=>{renderCart();openPanel(cartDrawer);});
+document.querySelector('#cart-drawer .close-button').addEventListener('click',closePanels);
+document.querySelector('.modal-close').addEventListener('click',closePanels);
+pageOverlay.addEventListener('click',closePanels);
+document.addEventListener('keydown',event=>{if(event.key==='Escape')closePanels();});
+document.querySelector('#product-detail').addEventListener('click',event=>{
+  const size=event.target.closest('[data-size]');if(size){document.querySelectorAll('.size-option').forEach(el=>el.classList.toggle('selected',el===size));return;}
+  const guide=event.target.closest('.size-guide');if(guide){const chart=document.querySelector('#size-chart'),open=chart.hidden;chart.hidden=!open;guide.setAttribute('aria-expanded',String(open));guide.textContent=open?'CLOSE SIZE GUIDE ×':'SIZE GUIDE ↗';return;}
+  const add=event.target.closest('[data-add]');if(add)addToCart(getProductById(add.dataset.add),document.querySelector('.size-option.selected')?.dataset.size||'M');
+});
+document.querySelector('#cart-items').addEventListener('click',event=>{const remove=event.target.closest('[data-remove]');if(remove){cart.splice(Number(remove.dataset.remove),1);persistCart();renderCart();}});
+document.querySelector('#cart-items').addEventListener('change',event=>{const select=event.target.closest('[data-qty]');if(select){cart[Number(select.dataset.qty)].qty=Number(select.value);persistCart();renderCart();}});
+document.querySelector('.checkout-button').addEventListener('click',()=>{if(!cart.length)return;appliedCoupon='';renderCheckout();});
+checkoutPanel.addEventListener('click',event=>{if(event.target.closest('.checkout-close'))closePanels();});
+checkoutPanel.addEventListener('click',event=>{
+  if(event.target.closest('[data-start-payment]')){startRazorpayPayment();return;}
+  if(event.target.closest('[data-start-cod]')){startCodOrder();return;}
+  if(event.target.closest('[data-refresh-admin]')){renderAdminOrders();return;}
+  const accountMode=event.target.closest('[data-account-mode]');if(accountMode){accountForm(accountMode.dataset.accountMode);return;}
+  const track=event.target.closest('[data-track-order]');if(track){trackAccountOrder(track);return;}
+  if(event.target.closest('[data-account-logout]')){fetch('/api/auth/logout',{method:'POST'}).catch(()=>{}).finally(()=>{currentAccount=null;updateAccountButton();updatePaymentControls();accountForm('login');});return;}
+  if(event.target.closest('[data-apply-coupon]')){const code=document.querySelector('#coupon').value.trim().toUpperCase();if(code==='WELCOME10'){appliedCoupon=code;document.querySelector('#coupon-message').textContent='WELCOME10 applied';const rows=document.querySelectorAll('.summary-lines p');rows[1].lastElementChild.textContent=`− ${money(discount())}`;rows[2].lastElementChild.textContent=shipping()===0?'FREE':money(shipping());rows[3].lastElementChild.textContent=money(subtotal()-discount()+shipping());showToast('WELCOME10 APPLIED');}else{document.querySelector('#coupon-message').textContent='That code is not valid in this demo.';}}
+});
+checkoutPanel.addEventListener('submit',async event=>{
+  const form=event.target;if(form.id!=='account-form')return;event.preventDefault();const error=form.querySelector('#account-error');if(!form.reportValidity())return;error.textContent='';const data=new FormData(form),mode=form.dataset.mode;let endpoint,payload;
+  if(mode==='register'){endpoint='/api/auth/register';payload={name:data.get('name'),email:data.get('email'),password:data.get('password')};}
+  else if(mode==='verify'){endpoint='/api/auth/verify';payload={email:data.get('email'),code:data.get('code')};}
+  else{endpoint='/api/auth/login';payload={email:data.get('email'),password:data.get('password')};}
+  const submit=form.querySelector('button[type="submit"]');submit.disabled=true;
+  try{const response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),result=await response.json();if(!response.ok)throw new Error(result.error||'Account request failed.');if(mode==='register'){accountEmail=result.email;accountForm('verify');return;}currentAccount=result.user;updateAccountButton();updatePaymentControls();await renderAccountOrders();}
+  catch(failure){error.textContent=failure.message;}finally{submit.disabled=false;}
+});
+checkoutPanel.addEventListener('submit',event=>{
+  if(event.target.id!=='checkout-form')return;event.preventDefault();
+  if(!event.target.reportValidity())return;
+  const data=new FormData(event.target),error=document.querySelector('#checkout-error');
+  if(!/^[0-9]{6}$/.test(data.get('pincode'))){error.textContent='Enter a valid 6-digit Indian PIN code.';return;}
+  if(!cart.length){error.textContent='Your bag is empty.';return;}
+  const order={number:`ML-${Date.now().toString().slice(-8)}`,name:data.get('name').trim(),items:totalUnits(),total:subtotal()-discount()+shipping(),createdAt:new Date().toISOString()};
+  const previous=readStore('mlang-demo-orders',[]),orders=Array.isArray(previous)?previous:[];orders.unshift({number:order.number,items:order.items,total:order.total,createdAt:order.createdAt});writeStore('mlang-demo-orders',orders.slice(0,20));
+  cart=[];persistCart();appliedCoupon='';renderCart();showOrderConfirmation(order);
+});
+document.querySelector('.search-toggle').addEventListener('click',openSearch);
+document.querySelector('.account-toggle').addEventListener('click',openAccount);
+document.querySelector('.orders-toggle').addEventListener('click',event=>{event.preventDefault();showOrderHistory();});
+document.querySelector('.menu-toggle').addEventListener('click',()=>document.querySelector('.main-nav').classList.toggle('open'));
+document.querySelectorAll('.main-nav a').forEach(link=>link.addEventListener('click',()=>document.querySelector('.main-nav').classList.remove('open')));
+document.querySelector('#newsletter-form').addEventListener('submit',event=>{event.preventDefault();document.querySelector('#newsletter-status').textContent='PREVIEW ONLY — NEWSLETTER SIGNUPS ARE NOT CONNECTED YET.';event.target.reset();});
+document.querySelector('.empty-cart-link').addEventListener('click',closePanels);
+document.querySelector('.collection-heading-label').textContent='THE FIRST DROP · 2026';
+renderCart();renderProducts();
+loadPaymentConfig();
