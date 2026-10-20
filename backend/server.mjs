@@ -12,6 +12,7 @@ const VALID_PRODUCT_SIZES=new Set(PRODUCT_SIZES);
 const pendingOrders=new Map();
 const authChallenges=new Map(),sessions=new Map();
 const codAttempts=new Map();
+const shippingQuoteAttempts=new Map();
 const shipmentRetryLocks=new Set();
 
 function loadLocalEnv(){
@@ -33,6 +34,7 @@ const packageDimensions={length:Number(process.env.SHIPROCKET_PACKAGE_LENGTH_CM)
 const shiprocketEnabled=Boolean(shiprocketEmail.includes('@')&&shiprocketPassword.length>8&&shiprocketPickup&&!/(replace|placeholder|example\.com)/i.test(`${shiprocketEmail} ${shiprocketPassword} ${shiprocketPickup}`)&&Object.values(packageDimensions).every(value=>Number.isFinite(value)&&value>0));
 const shiprocketBase='https://apiv2.shiprocket.in/v1/external';
 let shiprocketAuthCache={token:'',expiresAt:0};
+let shiprocketPickupPostcodeCache={value:'',expiresAt:0};
 const resendApiKey=process.env.RESEND_API_KEY||'',emailFrom=process.env.EMAIL_FROM||'',publicStoreUrl=(process.env.PUBLIC_STORE_URL||(process.env.VERCEL_URL?`https://${process.env.VERCEL_URL}`:'http://127.0.0.1:4173')).replace(/\/$/,'');
 const emailEnabled=resendApiKey.startsWith('re_')&&emailFrom.includes('@')&&!/(replace|placeholder|your-domain|your-verified-domain|example\.com|localhost)/i.test(`${resendApiKey} ${emailFrom}`);
 const supabaseUrl=(process.env.SUPABASE_URL||'').replace(/\/$/,'');
@@ -62,7 +64,7 @@ function priceCart(lines,coupon){
   });
   const subtotal=items.reduce((sum,item)=>sum+item.lineTotal,0);
   const discount=coupon==='WELCOME10'?Math.round(subtotal*.1):0;
-  const shipping=subtotal-discount>=3000?0:99;
+  const shipping=0;
   return {items,subtotal,discount,shipping,total:subtotal-discount+shipping};
 }
 function cleanField(value,max){return String(value??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,max);}
@@ -132,7 +134,7 @@ async function getStoreOrders({email,id,limit}={}){if(databaseEnabled){const par
 async function updateOrderEmailStatus(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const saved=orders.find(item=>item.id===order.id);if(saved){saved.emailStatus=order.emailStatus;writePrivateList('orders.json',orders);}}
 async function updateStoreOrder(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const index=orders.findIndex(item=>item.id===order.id);if(index>=0){orders[index]=order;writePrivateList('orders.json',orders);}}
 function isAdmin(session){return Boolean(session&&adminEmails.has(normalizeEmail(session.email)));}
-function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null},emailStatus:order.emailStatus||'unknown'};}
+function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null,charge:Number.isFinite(order.shippingCharge)?order.shippingCharge:null,courier:order.selectedCourierName||null},emailStatus:order.emailStatus||'unknown'};}
 function htmlEscape(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 async function sendEmail({to,subject,html,text}){
   if(!emailEnabled)return {status:'pending_setup'};
@@ -167,6 +169,52 @@ async function shiprocketRequest(route,{method='GET',body}={}){
   if(!response.ok)throw new Error(cleanField(data.message||data.errors||`Shiprocket returned HTTP ${response.status}.`,300));
   return data;
 }
+function packedWeight(items){return Math.round(packageDimensions.weight*items.reduce((sum,item)=>sum+item.qty,0)*1000)/1000;}
+async function shiprocketPickupPostcode(){
+  if(shiprocketPickupPostcodeCache.value&&shiprocketPickupPostcodeCache.expiresAt>Date.now())return shiprocketPickupPostcodeCache.value;
+  const data=await shiprocketRequest('/settings/company/pickup');
+  const locations=data.data?.shipping_address||data.shipping_address||[];
+  const location=locations.find(item=>(item.pickup_location||item.name)===shiprocketPickup);
+  const postcode=String(location?.pin_code||location?.pincode||location?.pickup_pincode||'');
+  if(!/^\d{6}$/.test(postcode))throw new Error('Could not read the configured Shiprocket pickup PIN code. Check the active pickup location.');
+  shiprocketPickupPostcodeCache={value:postcode,expiresAt:Date.now()+10*60*1000};
+  return postcode;
+}
+function signShippingQuote(quote){
+  const payload=Buffer.from(JSON.stringify(quote)).toString('base64url');
+  const signature=crypto.createHmac('sha256',shiprocketPassword).update(payload).digest('base64url');
+  return `${payload}.${signature}`;
+}
+function verifyShippingQuote(token,{items,coupon,pincode,paymentMethod}){
+  if(typeof token!=='string'||token.length>3000)throw new Error('Shipping quote expired. Please refresh the delivery estimate.');
+  const [payload,signature,...extra]=token.split('.');
+  const expected=crypto.createHmac('sha256',shiprocketPassword).update(payload||'').digest();
+  let supplied;try{supplied=Buffer.from(signature||'','base64url');}catch{supplied=Buffer.alloc(0);}
+  if(extra.length||expected.length!==supplied.length||!crypto.timingSafeEqual(expected,supplied))throw new Error('Shipping quote is invalid. Please refresh the delivery estimate.');
+  let quote;try{quote=JSON.parse(Buffer.from(payload,'base64url').toString('utf8'));}catch{throw new Error('Shipping quote is invalid. Please refresh the delivery estimate.');}
+  const itemKey=items.map(item=>`${item.id}:${item.size}:${item.qty}`).join('|');
+  if(quote.expiresAt<Date.now()||quote.pincode!==pincode||quote.coupon!==coupon||quote.paymentMethod!==paymentMethod||quote.itemKey!==itemKey||!Number.isSafeInteger(quote.amount)||quote.amount<0||!Number.isInteger(quote.courierId))throw new Error('Shipping quote changed or expired. Please check the delivery estimate again.');
+  return quote;
+}
+async function getShippingQuote({items,coupon,pincode,paymentMethod}){
+  if(!shiprocketEnabled)throw new Error('Live Shiprocket shipping rates are unavailable. Please contact the store.');
+  if(!/^\d{6}$/.test(pincode))throw new Error('Enter a valid 6-digit delivery PIN code to calculate shipping.');
+  if(!['COD','Prepaid'].includes(paymentMethod))throw new Error('Select a valid payment method to calculate shipping.');
+  const pickupPostcode=await shiprocketPickupPostcode(),weight=packedWeight(items);
+  const params=new URLSearchParams({pickup_postcode:pickupPostcode,delivery_postcode:pincode,cod:paymentMethod==='COD'?'1':'0',weight:String(weight),length:String(packageDimensions.length),breadth:String(packageDimensions.breadth),height:String(packageDimensions.height),declared_value:String(Math.max(1,items.reduce((sum,item)=>sum+item.lineTotal,0)-(coupon==='WELCOME10'?Math.round(items.reduce((sum,item)=>sum+item.lineTotal,0)*.1):0)))});
+  const response=await shiprocketRequest(`/courier/serviceability/?${params}`);
+  const couriers=response.data?.available_courier_companies||response.available_courier_companies||[];
+  const eligible=couriers.map(item=>{
+    const rate=Number(item.rate),extraCharges=['freight_charge','cod_charges','other_charges','coverage_charges','pickup_suppression_charges'].reduce((sum,key)=>sum+(Number.isFinite(Number(item[key]))?Number(item[key]):0),0);
+    return {id:Number(item.courier_company_id),name:cleanField(item.courier_name||'Courier',100),rate:Number.isFinite(rate)&&rate>0?rate:extraCharges,days:cleanField(item.estimated_delivery_days||item.etd||'',40),cod:item.cod};
+  }).filter(item=>Number.isInteger(item.id)&&Number.isFinite(item.rate)&&item.rate>0&&(paymentMethod!=='COD'||String(item.cod)==='1'));
+  eligible.sort((a,b)=>a.rate-b.rate);
+  const selected=eligible[0];
+  if(!selected)throw new Error('Shiprocket has no serviceable courier for this PIN code and payment method. Check the PIN or contact the store.');
+  const amount=Math.ceil(selected.rate),itemKey=items.map(item=>`${item.id}:${item.size}:${item.qty}`).join('|');
+  const quote={amount,courierId:selected.id,courierName:selected.name,estimatedDays:selected.days,pincode,coupon,paymentMethod,itemKey,expiresAt:Date.now()+20*60*1000};
+  return {...quote,token:signShippingQuote(quote)};
+}
 async function trackShiprocket(awb){
   if(!shiprocketEnabled)return {status:'pending_setup',timeline:[]};
   try{
@@ -190,13 +238,13 @@ async function bookShiprocket(order){
   const orderDate=new Date(order.createdAt).toISOString().slice(0,16).replace('T',' ');
   const cod=order.paymentMethod==='COD';
   const shippingCharge=Number.isFinite(order.shippingCharge)?order.shippingCharge:(typeof order.shipping==='number'?order.shipping:Math.max(0,Number(order.total)-Number(order.subtotal)+Number(order.discount||0)));
-  const payload={order_id:order.id,order_date:orderDate,pickup_location:shiprocketPickup,comment:`M’LANG ${cod?'COD':'prepaid'} website order`,billing_customer_name:firstName,billing_last_name:lastName,billing_address:customer.address,billing_city:customer.city,billing_pincode:customer.pincode,billing_state:customer.state,billing_country:'India',billing_email:customer.email,billing_phone:customer.phone.replace(/\D/g,'').slice(-10),shipping_is_billing:1,order_items:order.items.map(item=>({name:item.name,sku:item.sku,units:item.qty,selling_price:item.unitPrice,discount:0})),payment_method:cod?'COD':'Prepaid',shipping_charges:shippingCharge,total_discount:order.discount,sub_total:order.subtotal-order.discount,length:packageDimensions.length,breadth:packageDimensions.breadth,height:packageDimensions.height,weight:packageDimensions.weight};
+  const payload={order_id:order.id,order_date:orderDate,pickup_location:shiprocketPickup,comment:`M’LANG ${cod?'COD':'prepaid'} website order`,billing_customer_name:firstName,billing_last_name:lastName,billing_address:customer.address,billing_city:customer.city,billing_pincode:customer.pincode,billing_state:customer.state,billing_country:'India',billing_email:customer.email,billing_phone:customer.phone.replace(/\D/g,'').slice(-10),shipping_is_billing:1,order_items:order.items.map(item=>({name:item.name,sku:item.sku,units:item.qty,selling_price:item.unitPrice,discount:0})),payment_method:cod?'COD':'Prepaid',shipping_charges:shippingCharge,total_discount:order.discount,sub_total:order.subtotal-order.discount,length:packageDimensions.length,breadth:packageDimensions.breadth,height:packageDimensions.height,weight:packedWeight(order.items)};
   let shipmentId='',shiprocketOrderId='';
   try{
     const created=await shiprocketRequest('/orders/create/adhoc',{method:'POST',body:payload});
     shipmentId=created.shipment_id||created.data?.shipment_id||'';shiprocketOrderId=created.order_id||created.data?.order_id||'';
     if(!shipmentId)throw new Error(cleanField(created.message||'Shiprocket created no shipment ID.',300));
-    const assigned=await shiprocketRequest('/courier/assign/awb',{method:'POST',body:{shipment_id:shipmentId}});
+    const assigned=await shiprocketRequest('/courier/assign/awb',{method:'POST',body:{shipment_id:shipmentId,...(order.selectedCourierId?{courier_company_id:order.selectedCourierId}:{})}});
     const assignment=assigned.response?.data||assigned.data||assigned;
     const awb=assignment.awb_code||assignment.awb||assignment.awb_number;
     if(!awb)throw new Error(cleanField(assignment.awb_assign_error||assigned.message||'Shiprocket did not assign an AWB.',300));
@@ -213,6 +261,16 @@ async function handleRequest(req,res){
   if(req.method!=='GET'&&req.method!=='HEAD'&&req.headers.origin&&!allowedOrigins().has(req.headers.origin)){send(res,403,{error:'Request origin is not allowed.'});return;}
   const pathname=new URL(req.url,'http://localhost').pathname;
   if(req.method==='GET'&&pathname==='/api/config'){send(res,200,{razorpayEnabled:paymentsEnabled,keyId:paymentsEnabled?keyId:null,mode:paymentsEnabled?razorpayMode:'unconfigured',codEnabled:process.env.VERCEL!=='1'||databaseEnabled,shiprocketEnabled,emailEnabled,databaseEnabled});return;}
+  if(req.method==='POST'&&pathname==='/api/shipping/quote'){
+    const now=Date.now(),ip=String(req.headers['x-forwarded-for']||'unknown').split(',')[0].trim(),attempts=(shippingQuoteAttempts.get(ip)||[]).filter(time=>now-time<60_000);
+    if(attempts.length>=12){send(res,429,{error:'Too many shipping checks. Wait a minute and try again.'});return;}
+    attempts.push(now);shippingQuoteAttempts.set(ip,attempts);
+    try{
+      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon),pincode=cleanField(body.pincode,6),paymentMethod=body.paymentMethod==='COD'?'COD':'Prepaid';
+      send(res,200,{quote:await getShippingQuote({items:totals.items,coupon,pincode,paymentMethod})});
+    }catch(error){send(res,400,{error:error.message||'Could not calculate shipping for this PIN code.'});}
+    return;
+  }
   if(req.method==='GET'&&pathname==='/api/auth/me'){const session=sessionFor(req);send(res,200,{user:session?publicUser({id:session.userId,name:session.name,email:session.email}):null});return;}
   if(req.method==='POST'&&pathname==='/api/auth/register'){
     if(process.env.VERCEL==='1'&&!databaseEnabled){send(res,503,{error:'Connect Supabase before enabling customer accounts on Vercel.'});return;}
@@ -262,14 +320,15 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/razorpay/orders'){
     if(!paymentsEnabled){send(res,503,{error:'Razorpay is not configured for this environment.'});return;}
     try{
-      const body=await readJson(req),totals=priceCart(body.items,body.coupon==='WELCOME10'?'WELCOME10':'');
+      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon);
       const customer=validateCustomer(body.customer);
+      const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'Prepaid'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store contact and exchange policy before placing your order.'});return;}
       const session=sessionFor(req);if(session&&normalizeEmail(customer.email)!==session.email){send(res,403,{error:'Use the email address on your signed-in account for this order.'});return;}
       const guest=session?null:(guestFor(req)||setGuestCookie(res));
       const receipt=`mlang_${crypto.randomUUID().replaceAll('-','').slice(0,24)}`;
       const remote=await razorpayRequest('POST','/orders',{amount:totals.total*100,currency:'INR',receipt,notes:{store:'MLANG',environment:razorpayMode}});
-      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,customer,ownerEmail:session?.email||normalizeEmail(customer.email),ownerId:session?.userId||guest.guestId,ownerType:session?'account':'guest',createdAt:new Date().toISOString()});
+      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,customer,ownerEmail:session?.email||normalizeEmail(customer.email),ownerId:session?.userId||guest.guestId,ownerType:session?'account':'guest',createdAt:new Date().toISOString()});
       send(res,201,{keyId,orderId:remote.id,amount:remote.amount,currency:remote.currency,receipt,mode:razorpayMode});
     }catch(error){send(res,400,{error:error.message||'Could not create a payment order.'});}
     return;
@@ -284,7 +343,7 @@ async function handleRequest(req,res){
       const a=Buffer.from(expected),b=Buffer.from(signature);if(a.length!==b.length||!crypto.timingSafeEqual(a,b)){send(res,400,{error:'Razorpay payment signature did not verify.'});return;}
       const payment=await razorpayRequest('GET',`/payments/${encodeURIComponent(paymentId)}`);
       if(payment.order_id!==pending.razorpayOrderId||payment.amount!==pending.total*100||payment.currency!=='INR'||payment.status!=='captured'){send(res,409,{error:'Payment is not captured yet. Please wait and check your Razorpay dashboard.'});return;}
-      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,shippingCharge:pending.shipping,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
+      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,shippingCharge:pending.shipping,selectedCourierId:pending.selectedCourierId,selectedCourierName:pending.selectedCourierName,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';await saveOrder(order);await deletePendingPayment(orderId);const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
       if(pending.ownerType==='guest')res.setHeader('Set-Cookie','mlang_guest=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure');
       send(res,200,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),shipping:order.shipping,emailStatus:order.emailStatus}});
@@ -294,13 +353,14 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/orders/cod'){
     if(process.env.VERCEL==='1'&&!databaseEnabled){send(res,503,{error:'Connect Supabase before accepting COD orders on Vercel.'});return;}
     try{
-      const body=await readJson(req),totals=priceCart(body.items,body.coupon==='WELCOME10'?'WELCOME10':'');
+      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon);
       const customer=validateCustomer(body.customer);
+      const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'COD'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store policy before placing your order.'});return;}
       const clientKey=crypto.createHash('sha256').update(`${normalizeEmail(customer.email)}|${customer.phone.replace(/\D/g,'')}`).digest('hex'),now=Date.now(),attempts=(codAttempts.get(clientKey)||[]).filter(time=>now-time<60*60*1000);
       if(attempts.length>=5){send(res,429,{error:'Too many COD orders from this connection. Please try again later.'});return;}
       attempts.push(now);codAttempts.set(clientKey,attempts);
-      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:`cod_${crypto.randomUUID().replaceAll('-','').slice(0,20)}`,status:'cod_ordered',paymentMethod:'COD',items:totals.items,subtotal:totals.subtotal,discount:totals.discount,shippingCharge:totals.shipping,shipping:totals.shipping,total:totals.total,currency:'INR',customer,policyAccepted:true,createdAt:new Date().toISOString()};
+      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:`cod_${crypto.randomUUID().replaceAll('-','').slice(0,20)}`,status:'cod_ordered',paymentMethod:'COD',items:totals.items,subtotal:totals.subtotal,discount:totals.discount,shippingCharge:totals.shipping,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,shipping:totals.shipping,total:totals.total,currency:'INR',customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';
       await saveOrder(order);
       const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}

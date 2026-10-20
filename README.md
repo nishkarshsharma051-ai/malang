@@ -8,7 +8,7 @@ To start it again later, open Terminal in this folder and run:
 npm start
 ```
 
-Product browsing, filters, search, saved pieces, cart, demo discount, and checkout are interactive. COD checkout validates and saves an order server-side; if Shiprocket is configured, it creates the COD shipment, assigns an AWB, and requests pickup. Without Shiprocket setup, the order is still saved with shipment status pending setup for admin follow-up. Razorpay checkout is separate; demo orders are explicitly labeled as no-payment local previews. Prices, shipping thresholds, and promo codes are sample values.
+Product browsing, filters, search, saved pieces, cart, demo discount, and checkout are interactive. COD checkout validates and saves an order server-side; if Shiprocket is configured, it creates the COD shipment, assigns an AWB, and requests pickup. Without Shiprocket setup, the order is still saved with shipment status pending setup for admin follow-up. Razorpay checkout is separate; demo orders are explicitly labeled as no-payment local previews. Prices and promo codes are sample values. Checkout requests live prepaid and COD delivery rates from Shiprocket using the configured pickup PIN, customer PIN, and packed parcel dimensions/weight; Shiprocket may revise its final freight charge after weighing the parcel.
 
 `shared/catalog.js` is the shared product source for both the storefront and order server. Add or update a tee there: keep its cart `id` stable, give it a unique `sku`, then set its name, price, color, photos, description, and fit. The available sizes and chart measurements are stored beside the products.
 
