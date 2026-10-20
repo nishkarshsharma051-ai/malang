@@ -37,7 +37,7 @@ const emailEnabled=resendApiKey.startsWith('re_')&&emailFrom.includes('@')&&!/(r
 const supabaseUrl=(process.env.SUPABASE_URL||'').replace(/\/$/,'');
 const supabaseKey=process.env.SUPABASE_SECRET_KEY||process.env.SUPABASE_SERVICE_ROLE_KEY||'';
 const databaseEnabled=/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(supabaseUrl)&&/^(sb_secret_|eyJ)/.test(supabaseKey)&&!/(replace|placeholder|your-project)/i.test(`${supabaseUrl} ${supabaseKey}`);
-const paymentsEnabled=Boolean(razorpayMode&&keySecret.length>10&&!/replace|placeholder|your_key/i.test(`${keyId} ${keySecret}`)&&(razorpayMode==='test'||livePaymentsAllowed)&&(process.env.VERCEL!=='1'||databaseEnabled));
+const paymentsEnabled=Boolean(razorpayMode&&keySecret.length>10&&!/replace|placeholder|your_key/i.test(`${keyId} ${keySecret}`)&&((razorpayMode==='live'&&livePaymentsAllowed)||(razorpayMode==='test'&&process.env.VERCEL!=='1'))&&(process.env.VERCEL!=='1'||databaseEnabled));
 const adminEmail=normalizeEmail(process.env.ADMIN_EMAIL||'');
 const adminPasswordHash=process.env.ADMIN_PASSWORD_HASH||'';
 
@@ -244,7 +244,7 @@ async function handleRequest(req,res){
     return;
   }
   if(req.method==='POST'&&pathname==='/api/razorpay/verify'){
-    if(!paymentsEnabled){send(res,503,{error:'Razorpay test payments are not configured.'});return;}
+    if(!paymentsEnabled){send(res,503,{error:'Razorpay payments are not configured for this environment.'});return;}
     const session=sessionFor(req),guest=guestFor(req);if(!session&&!guest){send(res,401,{error:'Checkout session expired. Please restart checkout.'});return;}
     try{
       const body=await readJson(req),orderId=cleanField(body.razorpay_order_id,100),paymentId=cleanField(body.razorpay_payment_id,100),signature=cleanField(body.razorpay_signature,128);
