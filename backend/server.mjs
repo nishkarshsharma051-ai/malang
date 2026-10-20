@@ -12,6 +12,7 @@ const VALID_PRODUCT_SIZES=new Set(PRODUCT_SIZES);
 const pendingOrders=new Map();
 const authChallenges=new Map(),sessions=new Map();
 const codAttempts=new Map();
+const shipmentRetryLocks=new Set();
 
 function loadLocalEnv(){
   const envPath=path.join(PROJECT_ROOT,'.env');if(!fs.existsSync(envPath))return;
@@ -129,6 +130,7 @@ async function findStoreUser(email){if(databaseEnabled){const rows=await supabas
 async function insertStoreUser(user){if(databaseEnabled){await supabaseRequest('store_users',{method:'POST',body:user,prefer:'return=minimal'});return;}const users=readPrivateList('users.json');users.push(user);writePrivateList('users.json',users);}
 async function getStoreOrders({email,id,limit}={}){if(databaseEnabled){const params={select:'id,customer_email,data,created_at',order:'created_at.desc',limit:String(limit||500)};if(email)params.customer_email=`eq.${normalizeEmail(email)}`;if(id)params.id=`eq.${id}`;const rows=await supabaseRequest('store_orders',{params});return rows.map(row=>row.data);}let rows=readPrivateList('orders.json');if(email)rows=rows.filter(order=>normalizeEmail(order.customer?.email)===normalizeEmail(email));if(id)rows=rows.filter(order=>order.id===id);return rows.slice(0,limit||500);}
 async function updateOrderEmailStatus(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const saved=orders.find(item=>item.id===order.id);if(saved){saved.emailStatus=order.emailStatus;writePrivateList('orders.json',orders);}}
+async function updateStoreOrder(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const index=orders.findIndex(item=>item.id===order.id);if(index>=0){orders[index]=order;writePrivateList('orders.json',orders);}}
 function isAdmin(session){return Boolean(session&&adminEmails.has(normalizeEmail(session.email)));}
 function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null},emailStatus:order.emailStatus||'unknown'};}
 function htmlEscape(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
@@ -188,9 +190,10 @@ async function bookShiprocket(order){
   const orderDate=new Date(order.createdAt).toISOString().slice(0,16).replace('T',' ');
   const cod=order.paymentMethod==='COD';
   const payload={order_id:order.id,order_date:orderDate,pickup_location:shiprocketPickup,comment:`M’LANG ${cod?'COD':'prepaid'} website order`,billing_customer_name:firstName,billing_last_name:lastName,billing_address:customer.address,billing_city:customer.city,billing_pincode:customer.pincode,billing_state:customer.state,billing_country:'India',billing_email:customer.email,billing_phone:customer.phone.replace(/\D/g,'').slice(-10),shipping_is_billing:1,order_items:order.items.map(item=>({name:item.name,sku:item.sku,units:item.qty,selling_price:item.unitPrice,discount:0})),payment_method:cod?'COD':'Prepaid',shipping_charges:order.shipping,total_discount:order.discount,sub_total:order.subtotal-order.discount,length:packageDimensions.length,breadth:packageDimensions.breadth,height:packageDimensions.height,weight:packageDimensions.weight};
+  let shipmentId='',shiprocketOrderId='';
   try{
     const created=await shiprocketRequest('/orders/create/adhoc',{method:'POST',body:payload});
-    const shipmentId=created.shipment_id||created.data?.shipment_id,shiprocketOrderId=created.order_id||created.data?.order_id;
+    shipmentId=created.shipment_id||created.data?.shipment_id||'';shiprocketOrderId=created.order_id||created.data?.order_id||'';
     if(!shipmentId)throw new Error(cleanField(created.message||'Shiprocket created no shipment ID.',300));
     const assigned=await shiprocketRequest('/courier/assign/awb',{method:'POST',body:{shipment_id:shipmentId}});
     const assignment=assigned.response?.data||assigned.data||assigned;
@@ -200,7 +203,7 @@ async function bookShiprocket(order){
     try{const pickup=await shiprocketRequest('/courier/generate/pickup',{method:'POST',body:{shipment_id:[shipmentId]}});pickupMessage=cleanField(pickup.message||'',180);}
     catch(error){pickupStatus='pending';pickupMessage=cleanField(error.message,180);}
     return {provider:'Shiprocket',status:'booked',awb:String(awb),carrierStatus:cleanField(assignment.courier_name||'AWB assigned',80),shiprocketOrderId:String(shiprocketOrderId||''),shipmentId:String(shipmentId),pickupStatus,pickupMessage};
-  }catch(error){return {provider:'Shiprocket',status:'booking_failed',message:cleanField(error.message||'Shiprocket could not book this shipment.',300)};}
+  }catch(error){return {provider:'Shiprocket',status:'booking_failed',message:cleanField(error.message||'Shiprocket could not book this shipment.',300),...(shipmentId?{shipmentId:String(shipmentId)}:{}),...(shiprocketOrderId?{shiprocketOrderId:String(shiprocketOrderId)}:{})};}
 }
 
 async function handleRequest(req,res){
@@ -227,6 +230,31 @@ async function handleRequest(req,res){
   }
   if(req.method==='GET'&&pathname==='/api/admin/orders'){
     const session=sessionFor(req);if(!session||!isAdmin(session)){send(res,403,{error:'Admin access is required.'});return;}try{const orders=(await getStoreOrders({limit:500})).map(order=>({...orderSummary(order),customer:order.customer||{},paymentId:order.paymentId||null,razorpayOrderId:order.razorpayOrderId||null}));send(res,200,{orders});}catch(error){send(res,503,{error:error.message||'Could not load store orders.'});}return;
+  }
+  const retryShipmentMatch=pathname.match(/^\/api\/admin\/orders\/([^/]+)\/retry-shipment$/);
+  if(req.method==='POST'&&retryShipmentMatch){
+    const session=sessionFor(req);if(!session||!isAdmin(session)){send(res,403,{error:'Admin access is required.'});return;}
+    if(!shiprocketEnabled){send(res,503,{error:'Shiprocket is not configured for this deployment.'});return;}
+    let orderId;try{orderId=decodeURIComponent(retryShipmentMatch[1]);}catch{send(res,400,{error:'Invalid order ID.'});return;}
+    if(shipmentRetryLocks.has(orderId)){send(res,409,{error:'A shipment retry is already running for this order.'});return;}
+    try{
+      const order=(await getStoreOrders({id:orderId,limit:1}))[0];if(!order){send(res,404,{error:'Order not found.'});return;}
+      if(!['paid','cod_ordered'].includes(order.status)){send(res,409,{error:'Only paid or COD orders can be sent to Shiprocket.'});return;}
+      if(order.shipping?.status!=='booking_failed'){send(res,409,{error:'This order does not have a failed shipment booking.'});return;}
+      if(order.shipping?.awb||order.shipping?.shipmentId||order.shipping?.shiprocketOrderId){send(res,409,{error:'Shiprocket already created a shipment for this order. Check the Shiprocket dashboard before retrying.'});return;}
+      shipmentRetryLocks.add(orderId);
+      order.shipping={provider:'Shiprocket',status:'retrying',message:'Shipment retry in progress.'};
+      await updateStoreOrder(order);
+      order.shipping=await bookShiprocket(order);
+      await updateStoreOrder(order);
+      const status=order.shipping.status==='booked'?200:502;
+      send(res,status,{order:orderSummary(order)});
+    }catch(error){
+      let order;
+      try{order=(await getStoreOrders({id:orderId,limit:1}))[0];if(order&&order.shipping?.status==='retrying'){order.shipping={provider:'Shiprocket',status:'booking_failed',message:cleanField(error.message||'Could not save the shipment result.',240)};await updateStoreOrder(order);}}catch{}
+      send(res,503,{error:error.message||'Could not retry Shiprocket booking.'});
+    }finally{shipmentRetryLocks.delete(orderId);}
+    return;
   }
   const trackMatch=pathname.match(/^\/api\/account\/orders\/([^/]+)\/tracking$/);
   if(req.method==='GET'&&trackMatch){const session=sessionFor(req);if(!session){send(res,401,{error:'Please sign in to track an order.'});return;}const id=decodeURIComponent(trackMatch[1]);try{const order=(await getStoreOrders({email:session.email,limit:500})).find(item=>item.id===id);if(!order){send(res,404,{error:'Order not found.'});return;}if(!order.shipping?.awb){send(res,200,{status:order.shipping?.status||'pending_setup',message:order.shipping?.message||'Shiprocket AWB is not available yet.',timeline:[]});return;}send(res,200,await trackShiprocket(order.shipping.awb));}catch(error){send(res,503,{error:error.message||'Tracking is unavailable.'});}return;}
