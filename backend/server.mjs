@@ -25,7 +25,6 @@ const keyId=process.env.RAZORPAY_KEY_ID||'';
 const keySecret=process.env.RAZORPAY_KEY_SECRET||'';
 const razorpayMode=keyId.startsWith('rzp_live_')?'live':keyId.startsWith('rzp_test_')?'test':'';
 const livePaymentsAllowed=razorpayMode==='live'&&process.env.NODE_ENV==='production'&&publicHttpsUrl(process.env.PUBLIC_STORE_URL||'');
-const paymentsEnabled=Boolean(razorpayMode&&keySecret.length>10&&!/replace|placeholder|your_key/i.test(`${keyId} ${keySecret}`)&&(razorpayMode==='test'||livePaymentsAllowed));
 const shiprocketEmail=process.env.SHIPROCKET_API_EMAIL||'';
 const shiprocketPassword=process.env.SHIPROCKET_API_PASSWORD||'';
 const shiprocketPickup=process.env.SHIPROCKET_PICKUP_LOCATION||'';
@@ -33,17 +32,18 @@ const packageDimensions={length:Number(process.env.SHIPROCKET_PACKAGE_LENGTH_CM)
 const shiprocketEnabled=Boolean(shiprocketEmail.includes('@')&&shiprocketPassword.length>8&&shiprocketPickup&&!/(replace|placeholder|example\.com)/i.test(`${shiprocketEmail} ${shiprocketPassword} ${shiprocketPickup}`)&&Object.values(packageDimensions).every(value=>Number.isFinite(value)&&value>0));
 const shiprocketBase='https://apiv2.shiprocket.in/v1/external';
 let shiprocketAuthCache={token:'',expiresAt:0};
-const resendApiKey=process.env.RESEND_API_KEY||'',emailFrom=process.env.EMAIL_FROM||'',publicStoreUrl=(process.env.PUBLIC_STORE_URL||'http://127.0.0.1:4173').replace(/\/$/,'');
+const resendApiKey=process.env.RESEND_API_KEY||'',emailFrom=process.env.EMAIL_FROM||'',publicStoreUrl=(process.env.PUBLIC_STORE_URL||(process.env.VERCEL_URL?`https://${process.env.VERCEL_URL}`:'http://127.0.0.1:4173')).replace(/\/$/,'');
 const emailEnabled=resendApiKey.startsWith('re_')&&emailFrom.includes('@')&&!/(replace|placeholder|your-domain|your-verified-domain|example\.com|localhost)/i.test(`${resendApiKey} ${emailFrom}`);
 const supabaseUrl=(process.env.SUPABASE_URL||'').replace(/\/$/,'');
 const supabaseKey=process.env.SUPABASE_SECRET_KEY||process.env.SUPABASE_SERVICE_ROLE_KEY||'';
 const databaseEnabled=/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(supabaseUrl)&&/^(sb_secret_|eyJ)/.test(supabaseKey)&&!/(replace|placeholder|your-project)/i.test(`${supabaseUrl} ${supabaseKey}`);
+const paymentsEnabled=Boolean(razorpayMode&&keySecret.length>10&&!/replace|placeholder|your_key/i.test(`${keyId} ${keySecret}`)&&(razorpayMode==='test'||livePaymentsAllowed)&&(process.env.VERCEL!=='1'||databaseEnabled));
 const adminEmail=normalizeEmail(process.env.ADMIN_EMAIL||'');
 const adminPasswordHash=process.env.ADMIN_PASSWORD_HASH||'';
 
 function publicHttpsUrl(value){try{return new URL(value).protocol==='https:';}catch{return false;}}
-function allowedOrigins(){const origins=new Set(['http://127.0.0.1:4173','http://localhost:4173']);try{origins.add(new URL(publicStoreUrl).origin);}catch{}return origins;}
-function allowedHosts(){const hosts=new Set(['127.0.0.1:4173','localhost:4173']);try{hosts.add(new URL(publicStoreUrl).host);}catch{}return hosts;}
+function allowedOrigins(){const origins=new Set(['http://127.0.0.1:4173','http://localhost:4173']);try{origins.add(new URL(publicStoreUrl).origin);}catch{}if(process.env.VERCEL_URL)origins.add(`https://${process.env.VERCEL_URL}`);return origins;}
+function allowedHosts(){const hosts=new Set(['127.0.0.1:4173','localhost:4173']);try{hosts.add(new URL(publicStoreUrl).host);}catch{}if(process.env.VERCEL_URL)hosts.add(process.env.VERCEL_URL);return hosts;}
 
 function send(res,status,data){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));}
 function readJson(req){return new Promise((resolve,reject)=>{let raw='';req.on('data',chunk=>{raw+=chunk;if(raw.length>32768){reject(new Error('Request too large'));req.destroy();}});req.on('end',()=>{try{resolve(JSON.parse(raw||'{}'));}catch{reject(new Error('Invalid JSON'));}});req.on('error',reject);});}
@@ -96,6 +96,34 @@ async function supabaseRequest(table,{method='GET',params={},body,prefer}={}){
   if(!response.ok)throw new Error(`Supabase database request failed (${response.status}).`);
   const raw=await response.text();return raw?JSON.parse(raw):null;
 }
+async function savePendingPayment(id,pending){
+  if(!databaseEnabled){pendingOrders.set(id,pending);const expiry=setTimeout(()=>pendingOrders.delete(id),20*60*1000);expiry.unref?.();return;}
+  await supabaseRequest('store_pending_payments',{method:'POST',body:{razorpay_order_id:id,owner_id:pending.ownerId,owner_email:normalizeEmail(pending.ownerEmail),data:pending,expires_at:new Date(pending.createdAt?Date.parse(pending.createdAt)+20*60*1000:Date.now()+20*60*1000).toISOString()},prefer:'return=minimal'});
+}
+async function findPendingPayment(id){
+  if(!databaseEnabled)return pendingOrders.get(id)||null;
+  const rows=await supabaseRequest('store_pending_payments',{params:{select:'data,expires_at',razorpay_order_id:`eq.${id}`,limit:'1'}});const row=rows[0];if(!row||Date.parse(row.expires_at)<=Date.now())return null;return row.data;
+}
+async function deletePendingPayment(id){
+  if(!databaseEnabled){pendingOrders.delete(id);return;}
+  await supabaseRequest('store_pending_payments',{method:'DELETE',params:{razorpay_order_id:`eq.${id}`},prefer:'return=minimal'});
+}
+async function getAuthChallenge(email){
+  if(!databaseEnabled)return authChallenges.get(email)||null;
+  const rows=await supabaseRequest('store_auth_challenges',{params:{select:'data,expires_at',email:`eq.${normalizeEmail(email)}`,limit:'1'}});const row=rows[0];if(!row||Date.parse(row.expires_at)<=Date.now())return null;return row.data;
+}
+async function saveAuthChallenge(email,challenge){
+  if(!databaseEnabled){authChallenges.set(email,challenge);return;}
+  await supabaseRequest('store_auth_challenges',{method:'POST',body:{email:normalizeEmail(email),data:challenge,expires_at:new Date(challenge.expiresAt).toISOString()},prefer:'return=minimal'});
+}
+async function updateAuthChallenge(email,challenge){
+  if(!databaseEnabled){authChallenges.set(email,challenge);return;}
+  await supabaseRequest('store_auth_challenges',{method:'PATCH',params:{email:`eq.${normalizeEmail(email)}`},body:{data:challenge,expires_at:new Date(challenge.expiresAt).toISOString()},prefer:'return=minimal'});
+}
+async function deleteAuthChallenge(email){
+  if(!databaseEnabled){authChallenges.delete(email);return;}
+  await supabaseRequest('store_auth_challenges',{method:'DELETE',params:{email:`eq.${normalizeEmail(email)}`},prefer:'return=minimal'});
+}
 async function findStoreUser(email){if(databaseEnabled){const rows=await supabaseRequest('store_users',{params:{select:'id,name,email,salt,password_hash,created_at',email:`eq.${normalizeEmail(email)}`,limit:'1'}});return rows[0]||null;}return readPrivateList('users.json').find(user=>user.email===normalizeEmail(email))||null;}
 async function insertStoreUser(user){if(databaseEnabled){await supabaseRequest('store_users',{method:'POST',body:user,prefer:'return=minimal'});return;}const users=readPrivateList('users.json');users.push(user);writePrivateList('users.json',users);}
 async function getStoreOrders({email,id,limit}={}){if(databaseEnabled){const params={select:'id,customer_email,data,created_at',order:'created_at.desc',limit:String(limit||500)};if(email)params.customer_email=`eq.${normalizeEmail(email)}`;if(id)params.id=`eq.${id}`;const rows=await supabaseRequest('store_orders',{params});return rows.map(row=>row.data);}let rows=readPrivateList('orders.json');if(email)rows=rows.filter(order=>normalizeEmail(order.customer?.email)===normalizeEmail(email));if(id)rows=rows.filter(order=>order.id===id);return rows.slice(0,limit||500);}
@@ -107,8 +135,11 @@ async function sendEmail({to,subject,html,text}){
   if(!emailEnabled)return {status:'pending_setup'};
   try{const response=await fetch('https://api.resend.com/emails',{method:'POST',headers:{Authorization:`Bearer ${resendApiKey}`,'Content-Type':'application/json'},body:JSON.stringify({from:emailFrom,to:[to],subject,html,text})});if(!response.ok)return {status:'failed'};return {status:'sent'};}catch{return {status:'failed'};}
 }
-function sessionFor(req){const cookie=String(req.headers.cookie||'').split(';').map(part=>part.trim()).find(part=>part.startsWith('mlang_session='));const token=cookie?.slice('mlang_session='.length);const session=token&&sessions.get(token);if(!session||session.expiresAt<Date.now()){if(token)sessions.delete(token);return null;}return session;}
-function setSession(res,user){const token=crypto.randomBytes(32).toString('base64url');sessions.set(token,{userId:user.id,email:user.email,name:user.name,expiresAt:Date.now()+30*24*60*60*1000});res.setHeader('Set-Cookie',`mlang_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${publicHttpsUrl(publicStoreUrl)?'; Secure':''}`);}
+function sessionSecret(){return process.env.AUTH_SESSION_SECRET||supabaseKey||keySecret||adminPasswordHash;}
+function signSession(payload){const encoded=Buffer.from(JSON.stringify(payload)).toString('base64url'),signature=crypto.createHmac('sha256',sessionSecret()).update(encoded).digest('base64url');return `${encoded}.${signature}`;}
+function readSignedSession(token){try{if(!sessionSecret())return null;const [encoded,signature]=token.split('.');if(!encoded||!signature)return null;const expected=crypto.createHmac('sha256',sessionSecret()).update(encoded).digest('base64url');if(!crypto.timingSafeEqual(Buffer.from(signature),Buffer.from(expected)))return null;const session=JSON.parse(Buffer.from(encoded,'base64url').toString('utf8'));return session.expiresAt>Date.now()?session:null;}catch{return null;}}
+function sessionFor(req){const cookie=String(req.headers.cookie||'').split(';').map(part=>part.trim()).find(part=>part.startsWith('mlang_session='));const token=cookie?.slice('mlang_session='.length);if(!token)return null;if(process.env.VERCEL==='1')return readSignedSession(token);const session=sessions.get(token);if(!session||session.expiresAt<Date.now()){sessions.delete(token);return null;}return session;}
+function setSession(res,user){const session={userId:user.id,email:user.email,name:user.name,expiresAt:Date.now()+30*24*60*60*1000};if(process.env.VERCEL==='1'&&!sessionSecret())throw new Error('Set a stable AUTH_SESSION_SECRET in Vercel settings.');const token=process.env.VERCEL==='1'?signSession(session):crypto.randomBytes(32).toString('base64url');if(process.env.VERCEL!=='1')sessions.set(token,session);res.setHeader('Set-Cookie',`mlang_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${publicHttpsUrl(publicStoreUrl)||process.env.VERCEL==='1'?'; Secure':''}`);}
 function publicUser(user){return {id:user.id,name:user.name,email:user.email,role:adminEmail&&normalizeEmail(user.email)===adminEmail?'admin':'customer'};}
 function safeCompareHex(a,b){try{const x=Buffer.from(a,'hex'),y=Buffer.from(b,'hex');return x.length===y.length&&x.length>0&&crypto.timingSafeEqual(x,y);}catch{return false;}}
 function verifyAdminPassword(password){
@@ -168,19 +199,20 @@ async function bookShiprocket(order){
   }catch(error){return {provider:'Shiprocket',status:'booking_failed',message:cleanField(error.message||'Shiprocket could not book this shipment.',300)};}
 }
 
-const server=http.createServer(async(req,res)=>{
+async function handleRequest(req,res){
   const host=req.headers.host||'';
   if(!allowedHosts().has(host)){send(res,403,{error:'This host is not configured for the M’LANG store.'});return;}
   if(req.method!=='GET'&&req.method!=='HEAD'&&req.headers.origin&&!allowedOrigins().has(req.headers.origin)){send(res,403,{error:'Request origin is not allowed.'});return;}
   const pathname=new URL(req.url,'http://localhost').pathname;
-  if(req.method==='GET'&&pathname==='/api/config'){send(res,200,{razorpayEnabled:paymentsEnabled,keyId:paymentsEnabled?keyId:null,mode:paymentsEnabled?razorpayMode:'unconfigured',codEnabled:true,shiprocketEnabled,emailEnabled,databaseEnabled});return;}
+  if(req.method==='GET'&&pathname==='/api/config'){send(res,200,{razorpayEnabled:paymentsEnabled,keyId:paymentsEnabled?keyId:null,mode:paymentsEnabled?razorpayMode:'unconfigured',codEnabled:process.env.VERCEL!=='1'||databaseEnabled,shiprocketEnabled,emailEnabled,databaseEnabled});return;}
   if(req.method==='GET'&&pathname==='/api/auth/me'){const session=sessionFor(req);send(res,200,{user:session?publicUser({id:session.userId,name:session.name,email:session.email}):null});return;}
   if(req.method==='POST'&&pathname==='/api/auth/register'){
+    if(process.env.VERCEL==='1'&&!databaseEnabled){send(res,503,{error:'Connect Supabase before enabling customer accounts on Vercel.'});return;}
     if(!emailEnabled){send(res,503,{error:'Account email verification is not configured yet. Add Resend credentials and a verified sender in .env.'});return;}
-    try{const body=await readJson(req),name=cleanField(body.name,100),email=normalizeEmail(body.email),password=String(body.password||'');if(name.length<2||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<10||password.length>128)throw new Error('Enter your name, a valid email, and a password of 10–128 characters.');if(await findStoreUser(email)){send(res,409,{error:'An account with this email already exists. Sign in instead.'});return;}const existing=authChallenges.get(email);if(existing&&existing.sentAt>Date.now()-60000){send(res,429,{error:'Please wait a minute before requesting another verification email.'});return;}const code=String(crypto.randomInt(0,1000000)).padStart(6,'0'),salt=crypto.randomBytes(16).toString('hex'),passwordHash=crypto.scryptSync(password,salt,64).toString('hex');const result=await sendEmail({to:email,subject:'Verify your M’LANG account',text:`Your M’LANG verification code is ${code}. It expires in 10 minutes.`,html:`<div style="font-family:Arial,sans-serif;color:#171716"><p>M’LANG account verification</p><h1>${code}</h1><p>This code expires in 10 minutes.</p></div>`});if(result.status!=='sent'){send(res,502,{error:'Could not send the verification email. Check the mail provider configuration and try again.'});return;}authChallenges.set(email,{name,email,salt,passwordHash,codeHash:crypto.createHash('sha256').update(code).digest('hex'),expiresAt:Date.now()+10*60*1000,sentAt:Date.now(),attempts:0});send(res,200,{verificationRequired:true,email});}catch(error){send(res,400,{error:error.message||'Could not start account registration.'});}return;
+    try{const body=await readJson(req),name=cleanField(body.name,100),email=normalizeEmail(body.email),password=String(body.password||'');if(name.length<2||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)||password.length<10||password.length>128)throw new Error('Enter your name, a valid email, and a password of 10–128 characters.');if(await findStoreUser(email)){send(res,409,{error:'An account with this email already exists. Sign in instead.'});return;}const existing=await getAuthChallenge(email);if(existing&&existing.sentAt>Date.now()-60000){send(res,429,{error:'Please wait a minute before requesting another verification email.'});return;}const code=String(crypto.randomInt(0,1000000)).padStart(6,'0'),salt=crypto.randomBytes(16).toString('hex'),passwordHash=crypto.scryptSync(password,salt,64).toString('hex');const result=await sendEmail({to:email,subject:'Verify your M’LANG account',text:`Your M’LANG verification code is ${code}. It expires in 10 minutes.`,html:`<div style="font-family:Arial,sans-serif;color:#171716"><p>M’LANG account verification</p><h1>${code}</h1><p>This code expires in 10 minutes.</p></div>`});if(result.status!=='sent'){send(res,502,{error:'Could not send the verification email. Check the mail provider configuration and try again.'});return;}await saveAuthChallenge(email,{name,email,salt,passwordHash,codeHash:crypto.createHash('sha256').update(code).digest('hex'),expiresAt:Date.now()+10*60*1000,sentAt:Date.now(),attempts:0});send(res,200,{verificationRequired:true,email});}catch(error){send(res,400,{error:error.message||'Could not start account registration.'});}return;
   }
   if(req.method==='POST'&&pathname==='/api/auth/verify'){
-    try{const body=await readJson(req),email=normalizeEmail(body.email),code=cleanField(body.code,6),challenge=authChallenges.get(email);if(!challenge||challenge.expiresAt<Date.now()||challenge.attempts>=5){authChallenges.delete(email);send(res,400,{error:'Verification code expired. Start registration again.'});return;}challenge.attempts++;const submitted=crypto.createHash('sha256').update(code).digest('hex');if(!safeCompareHex(challenge.codeHash,submitted)){send(res,400,{error:'That verification code is incorrect.'});return;}if(await findStoreUser(email)){authChallenges.delete(email);send(res,409,{error:'An account with this email already exists. Sign in instead.'});return;}const user={id:crypto.randomUUID(),name:challenge.name,email,salt:challenge.salt,passwordHash:challenge.passwordHash,createdAt:new Date().toISOString()};await insertStoreUser({id:user.id,name:user.name,email:user.email,salt:user.salt,password_hash:user.passwordHash,created_at:user.createdAt});authChallenges.delete(email);setSession(res,user);send(res,201,{user:publicUser(user)});}catch(error){send(res,400,{error:error.message||'Could not verify the account.'});}return;
+    try{const body=await readJson(req),email=normalizeEmail(body.email),code=cleanField(body.code,6),challenge=await getAuthChallenge(email);if(!challenge||challenge.expiresAt<Date.now()||challenge.attempts>=5){await deleteAuthChallenge(email);send(res,400,{error:'Verification code expired. Start registration again.'});return;}challenge.attempts++;await updateAuthChallenge(email,challenge);const submitted=crypto.createHash('sha256').update(code).digest('hex');if(!safeCompareHex(challenge.codeHash,submitted)){send(res,400,{error:'That verification code is incorrect.'});return;}if(await findStoreUser(email)){await deleteAuthChallenge(email);send(res,409,{error:'An account with this email already exists. Sign in instead.'});return;}const user={id:crypto.randomUUID(),name:challenge.name,email,salt:challenge.salt,passwordHash:challenge.passwordHash,createdAt:new Date().toISOString()};await insertStoreUser({id:user.id,name:user.name,email:user.email,salt:user.salt,password_hash:user.passwordHash,created_at:user.createdAt});await deleteAuthChallenge(email);setSession(res,user);send(res,201,{user:publicUser(user)});}catch(error){send(res,400,{error:error.message||'Could not verify the account.'});}return;
   }
   if(req.method==='POST'&&pathname==='/api/auth/login'){
     try{const body=await readJson(req),email=normalizeEmail(body.email),password=String(body.password||'');if(email===adminEmail&&verifyAdminPassword(password)){const user={id:'store-admin',name:'THE MALANG COMPANY',email};setSession(res,user);send(res,200,{user:publicUser(user)});return;}const user=await findStoreUser(email);if(!user||password.length>128||!safeCompareHex(user.password_hash||user.passwordHash,crypto.scryptSync(password,user.salt,64).toString('hex'))){send(res,401,{error:'Email or password is incorrect.'});return;}setSession(res,user);send(res,200,{user:publicUser(user)});}catch(error){send(res,400,{error:error.message||'Could not sign in.'});}return;
@@ -204,8 +236,7 @@ const server=http.createServer(async(req,res)=>{
       if(normalizeEmail(customer.email)!==session.email){send(res,403,{error:'Use the email address on your signed-in account for this order.'});return;}
       const receipt=`mlang_${crypto.randomUUID().replaceAll('-','').slice(0,24)}`;
       const remote=await razorpayRequest('POST','/orders',{amount:totals.total*100,currency:'INR',receipt,notes:{store:'MLANG',environment:razorpayMode}});
-      pendingOrders.set(remote.id,{receipt,razorpayOrderId:remote.id,...totals,customer,ownerEmail:session.email,ownerId:session.userId,createdAt:new Date().toISOString()});
-      const expiry=setTimeout(()=>pendingOrders.delete(remote.id),20*60*1000);expiry.unref?.();
+      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,customer,ownerEmail:session.email,ownerId:session.userId,createdAt:new Date().toISOString()});
       send(res,201,{keyId,orderId:remote.id,amount:remote.amount,currency:remote.currency,receipt,mode:razorpayMode});
     }catch(error){send(res,400,{error:error.message||'Could not create a payment order.'});}
     return;
@@ -215,18 +246,19 @@ const server=http.createServer(async(req,res)=>{
     const session=sessionFor(req);if(!session){send(res,401,{error:'Sign in again to verify your order.'});return;}
     try{
       const body=await readJson(req),orderId=cleanField(body.razorpay_order_id,100),paymentId=cleanField(body.razorpay_payment_id,100),signature=cleanField(body.razorpay_signature,128);
-      const pending=pendingOrders.get(orderId);if(!pending||pending.ownerEmail!==session.email||pending.ownerId!==session.userId||!paymentId||!signature){send(res,400,{error:'Payment confirmation could not be matched to this session.'});return;}
+      const pending=await findPendingPayment(orderId);if(!pending||pending.ownerEmail!==session.email||pending.ownerId!==session.userId||!paymentId||!signature){send(res,400,{error:'Payment confirmation could not be matched to this session.'});return;}
       const expected=crypto.createHmac('sha256',keySecret).update(`${pending.razorpayOrderId}|${paymentId}`).digest('hex');
       const a=Buffer.from(expected),b=Buffer.from(signature);if(a.length!==b.length||!crypto.timingSafeEqual(a,b)){send(res,400,{error:'Razorpay payment signature did not verify.'});return;}
       const payment=await razorpayRequest('GET',`/payments/${encodeURIComponent(paymentId)}`);
       if(payment.order_id!==pending.razorpayOrderId||payment.amount!==pending.total*100||payment.currency!=='INR'||payment.status!=='captured'){send(res,409,{error:'Payment is not captured yet. Please wait and check your Razorpay dashboard.'});return;}
       const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
-      order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';await saveOrder(order);pendingOrders.delete(orderId);const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
+      order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';await saveOrder(order);await deletePendingPayment(orderId);const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
       send(res,200,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),shipping:order.shipping,emailStatus:order.emailStatus}});
     }catch(error){send(res,400,{error:error.message||'Payment verification failed.'});}
     return;
   }
   if(req.method==='POST'&&pathname==='/api/orders/cod'){
+    if(process.env.VERCEL==='1'&&!databaseEnabled){send(res,503,{error:'Connect Supabase before accepting COD orders on Vercel.'});return;}
     try{
       const body=await readJson(req),totals=priceCart(body.items,body.coupon==='WELCOME10'?'WELCOME10':'');
       const customer=validateCustomer(body.customer);
@@ -251,6 +283,10 @@ const server=http.createServer(async(req,res)=>{
   if(!stat.isFile()){res.writeHead(404);res.end('Not found');return;}
   res.writeHead(200,{'Content-Type':MIME[path.extname(target)]||'application/octet-stream','X-Content-Type-Options':'nosniff','Referrer-Policy':'strict-origin-when-cross-origin','Cache-Control':'no-cache'});
   if(req.method==='HEAD'){res.end();return;}fs.createReadStream(target).pipe(res);
-});
-const port=Number(process.env.PORT||4173),host=process.env.HOST||'127.0.0.1';
-server.listen(port,host,()=>console.log(`M’LANG server: http://${host}:${port}/ (${paymentsEnabled?`Razorpay ${razorpayMode} keys loaded`:'demo checkout; payment provider not configured'})`));
+}
+
+export { handleRequest };
+if(process.env.VERCEL!=='1'){
+  const port=Number(process.env.PORT||4173),host=process.env.HOST||'127.0.0.1';
+  http.createServer(handleRequest).listen(port,host,()=>console.log(`M’LANG server: http://${host}:${port}/ (${paymentsEnabled?`Razorpay ${razorpayMode} keys loaded`:'demo checkout; payment provider not configured'})`));
+}

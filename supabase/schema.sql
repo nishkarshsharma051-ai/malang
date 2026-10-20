@@ -15,13 +15,39 @@ create table if not exists public.store_orders (
   created_at timestamptz not null default now()
 );
 
+-- Razorpay order state must survive Vercel serverless instance changes.
+create table if not exists public.store_pending_payments (
+  razorpay_order_id text primary key,
+  owner_id text not null,
+  owner_email text not null,
+  data jsonb not null,
+  expires_at timestamptz not null
+);
+
+-- Registration verification challenges must survive serverless invocations.
+create table if not exists public.store_auth_challenges (
+  email text primary key,
+  data jsonb not null,
+  expires_at timestamptz not null
+);
+
 create index if not exists store_orders_customer_email_idx
   on public.store_orders (customer_email, created_at desc);
+create index if not exists store_pending_payments_expiry_idx
+  on public.store_pending_payments (expires_at);
+create index if not exists store_auth_challenges_expiry_idx
+  on public.store_auth_challenges (expires_at);
 
 alter table public.store_users enable row level security;
 alter table public.store_orders enable row level security;
+alter table public.store_pending_payments enable row level security;
+alter table public.store_auth_challenges enable row level security;
 
 revoke all on table public.store_users from anon, authenticated;
 revoke all on table public.store_orders from anon, authenticated;
+revoke all on table public.store_pending_payments from anon, authenticated;
+revoke all on table public.store_auth_challenges from anon, authenticated;
 grant select, insert, update, delete on table public.store_users to service_role;
 grant select, insert, update, delete on table public.store_orders to service_role;
+grant select, insert, update, delete on table public.store_pending_payments to service_role;
+grant select, insert, update, delete on table public.store_auth_challenges to service_role;
