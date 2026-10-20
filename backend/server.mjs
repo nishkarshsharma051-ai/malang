@@ -139,6 +139,8 @@ function sessionSecret(){return process.env.AUTH_SESSION_SECRET||supabaseKey||ke
 function signSession(payload){const encoded=Buffer.from(JSON.stringify(payload)).toString('base64url'),signature=crypto.createHmac('sha256',sessionSecret()).update(encoded).digest('base64url');return `${encoded}.${signature}`;}
 function readSignedSession(token){try{if(!sessionSecret())return null;const [encoded,signature]=token.split('.');if(!encoded||!signature)return null;const expected=crypto.createHmac('sha256',sessionSecret()).update(encoded).digest('base64url');if(!crypto.timingSafeEqual(Buffer.from(signature),Buffer.from(expected)))return null;const session=JSON.parse(Buffer.from(encoded,'base64url').toString('utf8'));return session.expiresAt>Date.now()?session:null;}catch{return null;}}
 function sessionFor(req){const cookie=String(req.headers.cookie||'').split(';').map(part=>part.trim()).find(part=>part.startsWith('mlang_session='));const token=cookie?.slice('mlang_session='.length);if(!token)return null;if(process.env.VERCEL==='1')return readSignedSession(token);const session=sessions.get(token);if(!session||session.expiresAt<Date.now()){sessions.delete(token);return null;}return session;}
+function guestFor(req){const token=String(req.headers.cookie||'').split(';').map(part=>part.trim()).find(part=>part.startsWith('mlang_guest='))?.slice('mlang_guest='.length);const guest=token?readSignedSession(token):null;return guest?.guestId?guest:null;}
+function setGuestCookie(res){const guest={guestId:crypto.randomUUID(),expiresAt:Date.now()+30*60*1000};const token=signSession(guest);res.setHeader('Set-Cookie',`mlang_guest=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=1800${publicHttpsUrl(publicStoreUrl)||process.env.VERCEL==='1'?'; Secure':''}`);return guest;}
 function setSession(res,user){const session={userId:user.id,email:user.email,name:user.name,expiresAt:Date.now()+30*24*60*60*1000};if(process.env.VERCEL==='1'&&!sessionSecret())throw new Error('Set a stable AUTH_SESSION_SECRET in Vercel settings.');const token=process.env.VERCEL==='1'?signSession(session):crypto.randomBytes(32).toString('base64url');if(process.env.VERCEL!=='1')sessions.set(token,session);res.setHeader('Set-Cookie',`mlang_session=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000${publicHttpsUrl(publicStoreUrl)||process.env.VERCEL==='1'?'; Secure':''}`);}
 function publicUser(user){return {id:user.id,name:user.name,email:user.email,role:adminEmail&&normalizeEmail(user.email)===adminEmail?'admin':'customer'};}
 function safeCompareHex(a,b){try{const x=Buffer.from(a,'hex'),y=Buffer.from(b,'hex');return x.length===y.length&&x.length>0&&crypto.timingSafeEqual(x,y);}catch{return false;}}
@@ -228,31 +230,32 @@ async function handleRequest(req,res){
   if(req.method==='GET'&&trackMatch){const session=sessionFor(req);if(!session){send(res,401,{error:'Please sign in to track an order.'});return;}const id=decodeURIComponent(trackMatch[1]);try{const order=(await getStoreOrders({email:session.email,limit:500})).find(item=>item.id===id);if(!order){send(res,404,{error:'Order not found.'});return;}if(!order.shipping?.awb){send(res,200,{status:order.shipping?.status||'pending_setup',message:order.shipping?.message||'Shiprocket AWB is not available yet.',timeline:[]});return;}send(res,200,await trackShiprocket(order.shipping.awb));}catch(error){send(res,503,{error:error.message||'Tracking is unavailable.'});}return;}
   if(req.method==='POST'&&pathname==='/api/razorpay/orders'){
     if(!paymentsEnabled){send(res,503,{error:'Razorpay is not configured for this environment.'});return;}
-    const session=sessionFor(req);if(!session){send(res,401,{error:'Sign in or create an account before paying.'});return;}
     try{
       const body=await readJson(req),totals=priceCart(body.items,body.coupon==='WELCOME10'?'WELCOME10':'');
       const customer=validateCustomer(body.customer);
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store contact and exchange policy before placing your order.'});return;}
-      if(normalizeEmail(customer.email)!==session.email){send(res,403,{error:'Use the email address on your signed-in account for this order.'});return;}
+      const session=sessionFor(req);if(session&&normalizeEmail(customer.email)!==session.email){send(res,403,{error:'Use the email address on your signed-in account for this order.'});return;}
+      const guest=session?null:(guestFor(req)||setGuestCookie(res));
       const receipt=`mlang_${crypto.randomUUID().replaceAll('-','').slice(0,24)}`;
       const remote=await razorpayRequest('POST','/orders',{amount:totals.total*100,currency:'INR',receipt,notes:{store:'MLANG',environment:razorpayMode}});
-      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,customer,ownerEmail:session.email,ownerId:session.userId,createdAt:new Date().toISOString()});
+      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,customer,ownerEmail:session?.email||normalizeEmail(customer.email),ownerId:session?.userId||guest.guestId,ownerType:session?'account':'guest',createdAt:new Date().toISOString()});
       send(res,201,{keyId,orderId:remote.id,amount:remote.amount,currency:remote.currency,receipt,mode:razorpayMode});
     }catch(error){send(res,400,{error:error.message||'Could not create a payment order.'});}
     return;
   }
   if(req.method==='POST'&&pathname==='/api/razorpay/verify'){
     if(!paymentsEnabled){send(res,503,{error:'Razorpay test payments are not configured.'});return;}
-    const session=sessionFor(req);if(!session){send(res,401,{error:'Sign in again to verify your order.'});return;}
+    const session=sessionFor(req),guest=guestFor(req);if(!session&&!guest){send(res,401,{error:'Checkout session expired. Please restart checkout.'});return;}
     try{
       const body=await readJson(req),orderId=cleanField(body.razorpay_order_id,100),paymentId=cleanField(body.razorpay_payment_id,100),signature=cleanField(body.razorpay_signature,128);
-      const pending=await findPendingPayment(orderId);if(!pending||pending.ownerEmail!==session.email||pending.ownerId!==session.userId||!paymentId||!signature){send(res,400,{error:'Payment confirmation could not be matched to this session.'});return;}
+      const pending=await findPendingPayment(orderId),ownsPending=pending&&(pending.ownerType==='guest'?guest?.guestId===pending.ownerId:session?.email===pending.ownerEmail&&session?.userId===pending.ownerId);if(!pending||!ownsPending||!paymentId||!signature||normalizeEmail(body.customer?.email)!==pending.ownerEmail){send(res,400,{error:'Payment confirmation could not be matched to this checkout.'});return;}
       const expected=crypto.createHmac('sha256',keySecret).update(`${pending.razorpayOrderId}|${paymentId}`).digest('hex');
       const a=Buffer.from(expected),b=Buffer.from(signature);if(a.length!==b.length||!crypto.timingSafeEqual(a,b)){send(res,400,{error:'Razorpay payment signature did not verify.'});return;}
       const payment=await razorpayRequest('GET',`/payments/${encodeURIComponent(paymentId)}`);
       if(payment.order_id!==pending.razorpayOrderId||payment.amount!==pending.total*100||payment.currency!=='INR'||payment.status!=='captured'){send(res,409,{error:'Payment is not captured yet. Please wait and check your Razorpay dashboard.'});return;}
       const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';await saveOrder(order);await deletePendingPayment(orderId);const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
+      if(pending.ownerType==='guest')res.setHeader('Set-Cookie','mlang_guest=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure');
       send(res,200,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),shipping:order.shipping,emailStatus:order.emailStatus}});
     }catch(error){send(res,400,{error:error.message||'Payment verification failed.'});}
     return;
