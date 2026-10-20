@@ -1,4 +1,7 @@
-import { PRODUCTS as PRODUCT_CATALOG, PRODUCT_SIZES, TEE_SIZE_CHART } from '../shared/catalog.js';
+const { PRODUCTS: PRODUCT_CATALOG, PRODUCT_SIZES, TEE_SIZE_CHART } = await fetch('/shared/catalog.json').then(response => {
+  if (!response.ok) throw new Error('The product catalog could not be loaded.');
+  return response.json();
+});
 
 // Shared helpers and DOM references.
 const asset = name => `public/assets/${name}`;

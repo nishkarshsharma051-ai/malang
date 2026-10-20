@@ -1,0 +1,17 @@
+Options -Indexes
+
+# Keep server credentials and private order/account data out of public URLs.
+<FilesMatch "^\.env(?:\..*)?$">
+  Require all denied
+</FilesMatch>
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteRule ^(?:\.env(?:\..*)?|\.git(?:/|$)|data(?:/|$)|backend(?:/|$)) - [F,L,NC]
+  RewriteRule (^|/)\.[^/]+(?:/|$) - [F,L,NC]
+  RewriteRule ^api(?:/.*)?$ api.php [QSA,L]
+</IfModule>
+
+<IfModule mod_headers.c>
+  Header always set X-Content-Type-Options "nosniff"
+  Header always set Referrer-Policy "strict-origin-when-cross-origin"
+</IfModule>
