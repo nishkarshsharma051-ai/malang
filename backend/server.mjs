@@ -4,11 +4,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { PRODUCTS_BY_ID, PRODUCT_SIZES } from '../shared/catalog.js';
 
 const PROJECT_ROOT=path.dirname(path.dirname(fileURLToPath(import.meta.url)));
-const catalog=JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT,'shared/catalog.json'),'utf8'));
-const PRODUCTS_BY_ID=Object.fromEntries(catalog.PRODUCTS.map(product=>[product.id,product]));
-const PRODUCT_SIZES=catalog.PRODUCT_SIZES;
 const MIME={'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'text/javascript; charset=utf-8','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg','.svg':'image/svg+xml','.json':'application/json; charset=utf-8','.ico':'image/x-icon'};
 const VALID_PRODUCT_SIZES=new Set(PRODUCT_SIZES);
 const pendingOrders=new Map();
