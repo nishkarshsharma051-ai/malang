@@ -42,8 +42,8 @@ const adminEmail=normalizeEmail(process.env.ADMIN_EMAIL||'');
 const adminPasswordHash=process.env.ADMIN_PASSWORD_HASH||'';
 
 function publicHttpsUrl(value){try{return new URL(value).protocol==='https:';}catch{return false;}}
-function allowedOrigins(){const origins=new Set(['http://127.0.0.1:4173','http://localhost:4173']);try{origins.add(new URL(publicStoreUrl).origin);}catch{}if(process.env.VERCEL_URL)origins.add(`https://${process.env.VERCEL_URL}`);return origins;}
-function allowedHosts(){const hosts=new Set(['127.0.0.1:4173','localhost:4173']);try{hosts.add(new URL(publicStoreUrl).host);}catch{}if(process.env.VERCEL_URL)hosts.add(process.env.VERCEL_URL);return hosts;}
+function allowedOrigins(){const origins=new Set(['http://127.0.0.1:4173','http://localhost:4173']);try{origins.add(new URL(publicStoreUrl).origin);}catch{}for(const domain of [process.env.VERCEL_URL,process.env.VERCEL_PROJECT_PRODUCTION_URL].filter(Boolean))origins.add(`https://${domain}`);return origins;}
+function allowedHosts(){const hosts=new Set(['127.0.0.1:4173','localhost:4173']);try{hosts.add(new URL(publicStoreUrl).host);}catch{}for(const domain of [process.env.VERCEL_URL,process.env.VERCEL_PROJECT_PRODUCTION_URL].filter(Boolean))hosts.add(domain);return hosts;}
 
 function send(res,status,data){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));}
 function readJson(req){return new Promise((resolve,reject)=>{let raw='';req.on('data',chunk=>{raw+=chunk;if(raw.length>32768){reject(new Error('Request too large'));req.destroy();}});req.on('end',()=>{try{resolve(JSON.parse(raw||'{}'));}catch{reject(new Error('Invalid JSON'));}});req.on('error',reject);});}
