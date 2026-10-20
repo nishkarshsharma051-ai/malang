@@ -147,7 +147,7 @@ function publicUser(user){return {id:user.id,name:user.name,email:user.email,rol
 function safeCompareHex(a,b){try{const x=Buffer.from(a,'hex'),y=Buffer.from(b,'hex');return x.length===y.length&&x.length>0&&crypto.timingSafeEqual(x,y);}catch{return false;}}
 function verifyAdminPassword(password,email=''){
   const configuredHash=adminPasswordHashes.get(normalizeEmail(email))||adminPasswordHash;
-  const match=configuredHash.match(/^scrypt\\$([a-f0-9]{32})\\$([a-f0-9]{128})$/i);if(!match||password.length>128)return false;
+  const match=configuredHash.match(/^scrypt\$([a-f0-9]{32})\$([a-f0-9]{128})$/i);if(!match||password.length>128)return false;
   const submitted=crypto.scryptSync(password,match[1],64).toString('hex');return safeCompareHex(match[2],submitted);
 }
 async function shiprocketToken(){
