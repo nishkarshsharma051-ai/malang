@@ -116,3 +116,11 @@ body.locked{overflow:hidden}
 .detail-gallery.gallery-count-2 { grid-template-rows: 1fr; }
 .detail-gallery.gallery-count-3 img:nth-child(3) { grid-column: 1 / -1; }
 .product-stock{margin:4px 0 0;font:9px var(--sans);color:#8d8a85}
+
+/* Checkout must stack after the base component rules above on phone widths. */
+@media (max-width: 900px) {
+  .checkout-modal { width: 100%; max-width: 100vw; }
+  .checkout-columns { grid-template-columns: minmax(0, 1fr); gap: 22px; }
+  .checkout-fields, .order-summary { width: 100%; min-width: 0; }
+  .order-summary { order: -1; }
+}
