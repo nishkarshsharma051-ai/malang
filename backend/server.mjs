@@ -31,6 +31,7 @@ const shiprocketEmail=process.env.SHIPROCKET_API_EMAIL||'';
 const shiprocketPassword=process.env.SHIPROCKET_API_PASSWORD||'';
 const shiprocketPickup=process.env.SHIPROCKET_PICKUP_LOCATION||'';
 const packageDimensions={length:Number(process.env.SHIPROCKET_PACKAGE_LENGTH_CM),breadth:Number(process.env.SHIPROCKET_PACKAGE_BREADTH_CM),height:Number(process.env.SHIPROCKET_PACKAGE_HEIGHT_CM),weight:Number(process.env.SHIPROCKET_PACKAGE_WEIGHT_KG)};
+const gstRegistered=/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test((process.env.GSTIN||'').trim().toUpperCase());
 const shiprocketEnabled=Boolean(shiprocketEmail.includes('@')&&shiprocketPassword.length>8&&shiprocketPickup&&!/(replace|placeholder|example\.com)/i.test(`${shiprocketEmail} ${shiprocketPassword} ${shiprocketPickup}`)&&Object.values(packageDimensions).every(value=>Number.isFinite(value)&&value>0));
 const shiprocketBase='https://apiv2.shiprocket.in/v1/external';
 let shiprocketAuthCache={token:'',expiresAt:0};
@@ -64,8 +65,9 @@ function priceCart(lines,coupon){
   });
   const subtotal=items.reduce((sum,item)=>sum+item.lineTotal,0);
   const discount=coupon==='WELCOME10'?Math.round(subtotal*.1):0;
+  const gst=gstRegistered?Math.round((subtotal-discount)*.05):0;
   const shipping=0;
-  return {items,subtotal,discount,shipping,total:subtotal-discount+shipping};
+  return {items,subtotal,discount,gst,shipping,total:subtotal-discount+gst+shipping};
 }
 function cleanField(value,max){return String(value??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,max);}
 function validateCustomer(input){
@@ -134,7 +136,7 @@ async function getStoreOrders({email,id,limit}={}){if(databaseEnabled){const par
 async function updateOrderEmailStatus(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const saved=orders.find(item=>item.id===order.id);if(saved){saved.emailStatus=order.emailStatus;writePrivateList('orders.json',orders);}}
 async function updateStoreOrder(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const index=orders.findIndex(item=>item.id===order.id);if(index>=0){orders[index]=order;writePrivateList('orders.json',orders);}}
 function isAdmin(session){return Boolean(session&&adminEmails.has(normalizeEmail(session.email)));}
-function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null,charge:Number.isFinite(order.shippingCharge)?order.shippingCharge:null,courier:order.selectedCourierName||null},emailStatus:order.emailStatus||'unknown'};}
+function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',subtotal:order.subtotal,discount:order.discount,gst:order.gst||0,total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null,charge:Number.isFinite(order.shippingCharge)?order.shippingCharge:null,courier:order.selectedCourierName||null},emailStatus:order.emailStatus||'unknown'};}
 function htmlEscape(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 async function sendEmail({to,subject,html,text}){
   if(!emailEnabled)return {status:'pending_setup'};
@@ -196,12 +198,12 @@ function verifyShippingQuote(token,{items,coupon,pincode,paymentMethod}){
   if(quote.expiresAt<Date.now()||quote.pincode!==pincode||quote.coupon!==coupon||quote.paymentMethod!==paymentMethod||quote.itemKey!==itemKey||!Number.isSafeInteger(quote.amount)||quote.amount<0||!Number.isInteger(quote.courierId))throw new Error('Shipping quote changed or expired. Please check the delivery estimate again.');
   return quote;
 }
-async function getShippingQuote({items,coupon,pincode,paymentMethod}){
+async function getShippingQuote({items,coupon,pincode,paymentMethod,declaredValue}){
   if(!shiprocketEnabled)throw new Error('Live Shiprocket shipping rates are unavailable. Please contact the store.');
   if(!/^\d{6}$/.test(pincode))throw new Error('Enter a valid 6-digit delivery PIN code to calculate shipping.');
   if(!['COD','Prepaid'].includes(paymentMethod))throw new Error('Select a valid payment method to calculate shipping.');
   const pickupPostcode=await shiprocketPickupPostcode(),weight=packedWeight(items);
-  const params=new URLSearchParams({pickup_postcode:pickupPostcode,delivery_postcode:pincode,cod:paymentMethod==='COD'?'1':'0',weight:String(weight),length:String(packageDimensions.length),breadth:String(packageDimensions.breadth),height:String(packageDimensions.height),declared_value:String(Math.max(1,items.reduce((sum,item)=>sum+item.lineTotal,0)-(coupon==='WELCOME10'?Math.round(items.reduce((sum,item)=>sum+item.lineTotal,0)*.1):0)))});
+  const params=new URLSearchParams({pickup_postcode:pickupPostcode,delivery_postcode:pincode,cod:paymentMethod==='COD'?'1':'0',weight:String(weight),length:String(packageDimensions.length),breadth:String(packageDimensions.breadth),height:String(packageDimensions.height),declared_value:String(Math.max(1,declaredValue))});
   const response=await shiprocketRequest(`/courier/serviceability/?${params}`);
   const couriers=response.data?.available_courier_companies||response.available_courier_companies||[];
   const eligible=couriers.map(item=>{
@@ -229,8 +231,8 @@ async function sendOrderEmail(order){
   const lines=order.items.map(item=>`<li>${htmlEscape(item.name)} · size ${htmlEscape(item.size)} × ${item.qty} — ₹${item.lineTotal.toLocaleString('en-IN')}</li>`).join('');
   const awb=order.shipping?.awb?`Shiprocket AWB: ${htmlEscape(order.shipping.awb)}`:'Shipment tracking will appear in your M’LANG account after a label is created.';
   const cod=order.paymentMethod==='COD',paymentLine=cod?'Payment: Cash on delivery. Please pay the courier on delivery.':'Payment: captured online.';
-  const text=`Thanks for your M’LANG order ${order.id}.\n${order.items.map(item=>`${item.name} · ${item.size} × ${item.qty}`).join('\n')}\nTotal: ₹${order.total}\n${paymentLine}\n${awb}\nOrder updates: ${publicStoreUrl}/#orders`;
-  return sendEmail({to:order.customer.email,subject:`M’LANG order received · ${order.id}`,text,html:`<div style="font-family:Arial,sans-serif;color:#171716;max-width:600px;margin:auto"><p style="letter-spacing:.16em">M’LANG</p><h1>Order received.</h1><p>Thanks, ${htmlEscape(order.customer.name)}. Your order <strong>${htmlEscape(order.id)}</strong> has been received.</p><ul>${lines}</ul><p><strong>Total: ₹${order.total.toLocaleString('en-IN')}</strong></p><p>${htmlEscape(paymentLine)}</p><p>${awb}</p><p><a href="${htmlEscape(publicStoreUrl)}/#orders">View order updates</a></p></div>`});
+  const text=`Thanks for your M’LANG order ${order.id}.\n${order.items.map(item=>`${item.name} · ${item.size} × ${item.qty}`).join('\n')}\nGST (5%): ₹${order.gst||0}\nShipping: ₹${order.shippingCharge||0}\nTotal: ₹${order.total}\n${paymentLine}\n${awb}\nOrder updates: ${publicStoreUrl}/#orders`;
+  return sendEmail({to:order.customer.email,subject:`M’LANG order received · ${order.id}`,text,html:`<div style="font-family:Arial,sans-serif;color:#171716;max-width:600px;margin:auto"><p style="letter-spacing:.16em">M’LANG</p><h1>Order received.</h1><p>Thanks, ${htmlEscape(order.customer.name)}. Your order <strong>${htmlEscape(order.id)}</strong> has been received.</p><ul>${lines}</ul><p>GST (5%): ₹${(order.gst||0).toLocaleString('en-IN')}<br>Shipping: ₹${(order.shippingCharge||0).toLocaleString('en-IN')}</p><p><strong>Total: ₹${order.total.toLocaleString('en-IN')}</strong></p><p>${htmlEscape(paymentLine)}</p><p>${awb}</p><p><a href="${htmlEscape(publicStoreUrl)}/#orders">View order updates</a></p></div>`});
 }
 async function bookShiprocket(order){
   if(!shiprocketEnabled)return {provider:'Shiprocket',status:'pending_setup',message:'Add Shiprocket API user credentials, the configured pickup-location name, and packed parcel dimensions/weight in .env.'};
@@ -260,14 +262,14 @@ async function handleRequest(req,res){
   if(!allowedHosts().has(host)){send(res,403,{error:'This host is not configured for the M’LANG store.'});return;}
   if(req.method!=='GET'&&req.method!=='HEAD'&&req.headers.origin&&!allowedOrigins().has(req.headers.origin)){send(res,403,{error:'Request origin is not allowed.'});return;}
   const pathname=new URL(req.url,'http://localhost').pathname;
-  if(req.method==='GET'&&pathname==='/api/config'){send(res,200,{razorpayEnabled:paymentsEnabled,keyId:paymentsEnabled?keyId:null,mode:paymentsEnabled?razorpayMode:'unconfigured',codEnabled:process.env.VERCEL!=='1'||databaseEnabled,shiprocketEnabled,emailEnabled,databaseEnabled});return;}
+  if(req.method==='GET'&&pathname==='/api/config'){send(res,200,{razorpayEnabled:paymentsEnabled,keyId:paymentsEnabled?keyId:null,mode:paymentsEnabled?razorpayMode:'unconfigured',codEnabled:process.env.VERCEL!=='1'||databaseEnabled,shiprocketEnabled,emailEnabled,databaseEnabled,gstEnabled:gstRegistered});return;}
   if(req.method==='POST'&&pathname==='/api/shipping/quote'){
     const now=Date.now(),ip=String(req.headers['x-forwarded-for']||'unknown').split(',')[0].trim(),attempts=(shippingQuoteAttempts.get(ip)||[]).filter(time=>now-time<60_000);
     if(attempts.length>=12){send(res,429,{error:'Too many shipping checks. Wait a minute and try again.'});return;}
     attempts.push(now);shippingQuoteAttempts.set(ip,attempts);
     try{
       const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon),pincode=cleanField(body.pincode,6),paymentMethod=body.paymentMethod==='COD'?'COD':'Prepaid';
-      send(res,200,{quote:await getShippingQuote({items:totals.items,coupon,pincode,paymentMethod})});
+      send(res,200,{quote:await getShippingQuote({items:totals.items,coupon,pincode,paymentMethod,declaredValue:totals.subtotal-totals.discount+totals.gst})});
     }catch(error){send(res,400,{error:error.message||'Could not calculate shipping for this PIN code.'});}
     return;
   }
@@ -322,7 +324,7 @@ async function handleRequest(req,res){
     try{
       const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon);
       const customer=validateCustomer(body.customer);
-      const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'Prepaid'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.shipping;
+      const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'Prepaid'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.gst+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store contact and exchange policy before placing your order.'});return;}
       const session=sessionFor(req);if(session&&normalizeEmail(customer.email)!==session.email){send(res,403,{error:'Use the email address on your signed-in account for this order.'});return;}
       const guest=session?null:(guestFor(req)||setGuestCookie(res));
@@ -343,10 +345,10 @@ async function handleRequest(req,res){
       const a=Buffer.from(expected),b=Buffer.from(signature);if(a.length!==b.length||!crypto.timingSafeEqual(a,b)){send(res,400,{error:'Razorpay payment signature did not verify.'});return;}
       const payment=await razorpayRequest('GET',`/payments/${encodeURIComponent(paymentId)}`);
       if(payment.order_id!==pending.razorpayOrderId||payment.amount!==pending.total*100||payment.currency!=='INR'||payment.status!=='captured'){send(res,409,{error:'Payment is not captured yet. Please wait and check your Razorpay dashboard.'});return;}
-      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,shippingCharge:pending.shipping,selectedCourierId:pending.selectedCourierId,selectedCourierName:pending.selectedCourierName,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
+      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,gst:pending.gst||0,shippingCharge:pending.shipping,selectedCourierId:pending.selectedCourierId,selectedCourierName:pending.selectedCourierName,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';await saveOrder(order);await deletePendingPayment(orderId);const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
       if(pending.ownerType==='guest')res.setHeader('Set-Cookie','mlang_guest=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure');
-      send(res,200,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),shipping:order.shipping,emailStatus:order.emailStatus}});
+      send(res,200,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,gst:order.gst,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),shipping:order.shipping,emailStatus:order.emailStatus}});
     }catch(error){send(res,400,{error:error.message||'Payment verification failed.'});}
     return;
   }
@@ -355,16 +357,16 @@ async function handleRequest(req,res){
     try{
       const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon);
       const customer=validateCustomer(body.customer);
-      const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'COD'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.shipping;
+      const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'COD'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.gst+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store policy before placing your order.'});return;}
       const clientKey=crypto.createHash('sha256').update(`${normalizeEmail(customer.email)}|${customer.phone.replace(/\D/g,'')}`).digest('hex'),now=Date.now(),attempts=(codAttempts.get(clientKey)||[]).filter(time=>now-time<60*60*1000);
       if(attempts.length>=5){send(res,429,{error:'Too many COD orders from this connection. Please try again later.'});return;}
       attempts.push(now);codAttempts.set(clientKey,attempts);
-      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:`cod_${crypto.randomUUID().replaceAll('-','').slice(0,20)}`,status:'cod_ordered',paymentMethod:'COD',items:totals.items,subtotal:totals.subtotal,discount:totals.discount,shippingCharge:totals.shipping,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,shipping:totals.shipping,total:totals.total,currency:'INR',customer,policyAccepted:true,createdAt:new Date().toISOString()};
+      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:`cod_${crypto.randomUUID().replaceAll('-','').slice(0,20)}`,status:'cod_ordered',paymentMethod:'COD',items:totals.items,subtotal:totals.subtotal,discount:totals.discount,gst:totals.gst,shippingCharge:totals.shipping,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,shipping:totals.shipping,total:totals.total,currency:'INR',customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';
       await saveOrder(order);
       const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
-      send(res,201,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),paymentMethod:order.paymentMethod,shipping:order.shipping,emailStatus:order.emailStatus}});
+      send(res,201,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,gst:order.gst,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),paymentMethod:order.paymentMethod,shipping:order.shipping,emailStatus:order.emailStatus}});
     }catch(error){send(res,400,{error:error.message||'Could not place the COD order.'});}
     return;
   }

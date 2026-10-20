@@ -36,7 +36,7 @@ The server recomputes the cart total, creates the Razorpay order, verifies the p
 
 After a Razorpay payment is verified, the server creates a custom order in Shiprocket, requests an AWB assignment, schedules pickup, and saves the AWB/status with the paid order. Configure a dedicated Shiprocket API user's email and password, the exact pickup-location name saved in your Shiprocket account, and the packed parcel's dimensions and weight in `.env`. API credentials must remain server-side. If setup is incomplete or Shiprocket rejects a booking, the paid order is still saved and its shipment remains pending/failed for manual handling; no-payment demo orders never create shipments.
 
-The customer account tracking control reads tracking updates from Shiprocket by AWB. Shiprocket API users are created from **Settings → API → Add New API User**; use an API user email different from your main login. The API login returns a bearer token that the server refreshes automatically. Before live orders, verify the pickup location and packed parcel measurements in `.env`.
+The customer account tracking control reads tracking updates from Shiprocket by AWB. Shiprocket API users are created from **Settings → API → Add New API User**; use an API user email different from your main login. The API login returns a bearer token that the server refreshes automatically. Before live orders, verify the pickup location and packed parcel measurements in `.env`. For GST collection, set the store's active GSTIN as the server-only `GSTIN` environment variable; checkout adds 5% GST to discounted T-shirt value only when that variable has valid GSTIN format.
 
 ## Customer accounts and emails
 
