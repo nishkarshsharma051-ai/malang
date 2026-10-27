@@ -127,3 +127,5 @@ body.locked{overflow:hidden}
 
 /* Admin inventory editing and zero-stock states */
 .inventory-row{display:grid!important;grid-template-columns:1fr 110px;align-items:center;gap:14px;margin:10px 0!important;padding:10px 0;border-bottom:1px solid var(--line);font:10px var(--sans)!important;letter-spacing:0!important}.inventory-row input{min-height:40px!important;text-align:center}.admin-panel #admin-inventory-form{margin:20px 0 26px;padding:16px 0 20px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}.admin-panel #admin-inventory-form>.eyebrow{font-size:8px}.admin-panel #admin-inventory-form .place-order:disabled{opacity:.55;cursor:wait}.add-to-bag:disabled{opacity:.5;cursor:not-allowed}
+
+.inventory-product{margin:0 0 16px;padding:12px 14px;border:1px solid var(--line)}.inventory-product legend{padding:0 6px;font:10px var(--mono);letter-spacing:.04em;color:var(--ink)}.inventory-product .inventory-row{grid-template-columns:1fr 90px;margin:4px 0!important;padding:7px 0}.inventory-product .inventory-row:last-child{border-bottom:0}
