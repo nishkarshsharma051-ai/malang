@@ -74,8 +74,8 @@ function updateShippingQuoteSummary(message='Enter your delivery PIN code for a 
   if(lines.length!==4)return;
   lines[0].textContent=prepaid?money(prepaid.amount):'—';
   lines[1].textContent=cod?money(cod.amount):'—';
-  lines[2].textContent=prepaid?money(subtotal()-discount()+gst()+prepaid.amount):'—';
-  lines[3].textContent=cod?money(subtotal()-discount()+gst()+cod.amount):'—';
+  lines[2].textContent=prepaid?money(subtotal()-discount()+gst()+prepaid.amount):`${money(subtotal()-discount()+gst())} + shipping`;
+  lines[3].textContent=cod?money(subtotal()-discount()+gst()+cod.amount):`${money(subtotal()-discount()+gst())} + shipping`;
   const gstLine=document.querySelector('#gst-amount');if(gstLine)gstLine.textContent=paymentSettings.gstEnabled?money(gst()):'Not configured';
   const note=document.querySelector('#shipping-quote-status');if(note)note.textContent=message;const taxNote=checkoutPanel.querySelector('.tax-status-note');if(taxNote)taxNote.textContent=paymentSettings.gstEnabled?'5% GST is added on the discounted T-shirt value.':'GST will be calculated after the store GSTIN is configured.';
   const prepaidButton=checkoutPanel.querySelector('[data-start-payment]'),codButton=checkoutPanel.querySelector('[data-start-cod]');
@@ -87,23 +87,29 @@ async function refreshShippingQuotes(){
   const request=++shippingQuoteRequest,form=document.querySelector('#checkout-form'),pincode=form?.elements.pincode.value.trim()||'';
   shippingQuotes={prepaid:null,cod:null};
   if(!/^\d{6}$/.test(pincode)){updateShippingQuoteSummary('Enter a valid 6-digit PIN code to calculate delivery charges.');return;}
-  updateShippingQuoteSummary('Calculating live courier charges…');
-  const results=await Promise.all(['Prepaid','COD'].map(async paymentMethod=>{
-    const response=await fetch('/api/shipping/quote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart,coupon:appliedCoupon,pincode,paymentMethod})});
-    const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not calculate shipping.');return [paymentMethod,data.quote];
-  }).map(promise=>promise.catch(error=>({error}))));
-  if(request!==shippingQuoteRequest)return;
-  const errors=[];
-  for(const result of results){if(result.error){errors.push(result.error.message);continue;}const [method,quote]=result;shippingQuotes[method==='COD'?'cod':'prepaid']=quote;}
-  const status=errors.length?errors[0]:`Live Shiprocket rates · cheapest eligible courier${shippingQuotes.prepaid?.estimatedDays?` · prepaid ${shippingQuotes.prepaid.estimatedDays} days`:''}${shippingQuotes.cod?.estimatedDays?` · COD ${shippingQuotes.cod.estimatedDays} days`:''}. Final carrier charges can change if parcel weight or dimensions are revised.`;
-  updateShippingQuoteSummary(status);
+  const methods=['Prepaid','COD'],errors=[];let pending=methods.length;
+  updateShippingQuoteSummary('Getting live delivery rates…');
+  await Promise.all(methods.map(async paymentMethod=>{
+    try{
+      const response=await fetch('/api/shipping/quote',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({items:cart,coupon:appliedCoupon,pincode,paymentMethod})});
+      const data=await response.json();if(!response.ok)throw new Error(data.error||'Could not calculate shipping.');
+      if(request!==shippingQuoteRequest)return;
+      shippingQuotes[paymentMethod==='COD'?'cod':'prepaid']=data.quote;
+    }catch(error){if(request===shippingQuoteRequest)errors.push(`${paymentMethod}: ${error.message}`);}
+    if(request!==shippingQuoteRequest)return;
+    pending--;
+    const status=pending
+      ? (shippingQuotes.prepaid||shippingQuotes.cod?'One delivery rate is ready · checking the other option…':'Getting live delivery rates…')
+      : errors.length?errors.join(' · '):`Live courier rates ready · prepaid ${shippingQuotes.prepaid?.estimatedDays||'—'} days, COD ${shippingQuotes.cod?.estimatedDays||'—'} days.`;
+    updateShippingQuoteSummary(status);
+  }));
 }
 function renderCheckout(){
   shippingQuotes={prepaid:null,cod:null};
   const paymentMode=paymentSettings.mode==='live'?'live':paymentSettings.mode==='test'?'test':'unconfigured',paymentLabel=paymentMode==='live'?'LIVE MODE':paymentMode==='test'?'TEST MODE':'NOT CONFIGURED',paymentButtonLabel=paymentMode==='live'?'PAY SECURELY WITH RAZORPAY':paymentMode==='test'?'PAY WITH RAZORPAY TEST MODE':'RAZORPAY NOT CONFIGURED',checkoutAvailability=paymentSettings.codEnabled?'Pay online with Razorpay or choose cash on delivery. Delivery charges are calculated from your PIN code.':'Order placement needs the store database to be connected.';
   checkoutPanel.innerHTML=`<button class="close-button checkout-close" aria-label="Close checkout">×</button><div class="checkout-inner"><div class="checkout-title"><p class="eyebrow">M’LANG · SECURE CHECKOUT</p><h2>Complete your order.</h2><p>${checkoutAvailability}</p></div><form id="checkout-form" novalidate><div class="checkout-columns"><div class="checkout-fields"><fieldset><legend>CONTACT</legend><label>Email address<input name="email" type="email" autocomplete="email" value="${escapeHtml(currentAccount?.email||'')}" ${currentAccount?'readonly':''} required></label><label>Phone number<input name="phone" type="tel" autocomplete="tel" inputmode="numeric" pattern="[0-9+ ()-]{8,16}" required></label></fieldset><fieldset><legend>DELIVERY ADDRESS</legend><label>Full name<input name="name" autocomplete="name" value="${escapeHtml(currentAccount?.name||'')}" required></label><label>Address<input name="address" autocomplete="street-address" required></label><div class="field-row"><label>City<input name="city" autocomplete="address-level2" required></label><label>State<input name="state" autocomplete="address-level1" required></label></div><div class="field-row"><label>PIN code<input name="pincode" autocomplete="postal-code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required></label><label>Country<select name="country" required><option value="India">India</option></select></label></div></fieldset><fieldset><legend>PAYMENT</legend><div class="payment-choice"><span>RAZORPAY HOSTED CHECKOUT</span><strong>${paymentLabel}</strong></div><p class="form-note" id="razorpay-status">Checking payment configuration…</p><p class="form-note">Cash on delivery · Pay the order total to the courier when your order arrives.</p></fieldset><label class="policy-consent"><input type="checkbox" name="policyConsent" required> I have read and acknowledge the <a href="#contact" target="_blank" rel="noreferrer">Return, Refund &amp; Exchange Policy</a>.</label>${paymentMode==='test'?'<label class="test-payment-consent"><input type="checkbox" name="testPaymentConsent"> I understand this is a test payment; no real money will be charged.</label>':''}<p class="form-error" id="checkout-error" role="alert"></p><button class="place-order razorpay-button" type="button" data-start-payment disabled>${paymentButtonLabel} <span>↗</span></button><button class="cod-order-button" type="button" data-start-cod disabled>PLACE COD ORDER · CALCULATING…</button></div><aside class="order-summary"><p class="eyebrow">ORDER SUMMARY · ${totalUnits()} ITEM${totalUnits()===1?'':'S'}</p><div class="checkout-items">${cart.map(item=>{const p=getProductById(item.id);return `<div class="checkout-item"><img src="${asset(p.images[0])}" alt=""><span>${p.name} · ${item.size} × ${item.qty}</span><strong>${money(p.price*item.qty)}</strong></div>`;}).join('')}</div><div class="coupon-form" id="coupon-form"><label for="coupon">DISCOUNT CODE</label><div><input id="coupon" name="coupon" placeholder="Enter code" value="${appliedCoupon}"><button type="button" data-apply-coupon>APPLY</button></div><small id="coupon-message">${appliedCoupon?'WELCOME10 applied':'Try WELCOME10 for 10% off.'}</small></div><div class="summary-lines"><p><span>Subtotal</span><span>${money(subtotal())}</span></p><p><span>Discount</span><span>− ${money(discount())}</span></p><p><span>GST · 5%</span><span id="gst-amount">${paymentSettings.gstEnabled?money(gst()):'Not configured'}</span></p><p><span>Shipping · prepaid</span><span id="shipping-prepaid">—</span></p><p><span>Shipping · COD</span><span id="shipping-cod">—</span></p><p><span>Total · prepaid</span><strong id="total-prepaid">—</strong></p><p class="summary-total"><span>Total · COD</span><strong id="total-cod">—</strong></p></div><p class="form-note tax-status-note">${paymentSettings.gstEnabled?'5% GST is added on the discounted T-shirt value.':'GST will be calculated after the store GSTIN is configured.'}</p><p class="form-note" id="shipping-quote-status">Enter your delivery PIN code for a live shipping quote.</p><p class="form-note">Shiprocket calculates an estimate using pickup/delivery PINs and parcel dimensions/weight. Final carrier charges may change after parcel measurement.</p></aside></div></form></div>`;
   openPanel(checkoutPanel);updatePaymentControls();
-  checkoutPanel.querySelector('[name="pincode"]').addEventListener('input',()=>{clearTimeout(window.mlangShippingDebounce);window.mlangShippingDebounce=setTimeout(refreshShippingQuotes,500);});
+  checkoutPanel.querySelector('[name="pincode"]').addEventListener('input',()=>{shippingQuoteRequest++;shippingQuotes={prepaid:null,cod:null};updateShippingQuoteSummary('Updating delivery PIN…');clearTimeout(window.mlangShippingDebounce);window.mlangShippingDebounce=setTimeout(refreshShippingQuotes,500);});
 }
 function showOrderConfirmation(order){
   const shippingMessage=order.shipping?.status==='booked'?`Shiprocket shipment booked · AWB ${order.shipping.awb}.`:order.shipping?.status==='pending_setup'?'Shiprocket booking is pending API credentials, pickup location, and parcel dimensions in .env.':'Shiprocket could not book this shipment yet; check the admin order record for the carrier response.';
