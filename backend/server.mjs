@@ -52,14 +52,14 @@ function allowedHosts(){const hosts=new Set(['127.0.0.1:4173','localhost:4173'])
 
 function send(res,status,data){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff'});res.end(JSON.stringify(data));}
 function readJson(req){return new Promise((resolve,reject)=>{let raw='';req.on('data',chunk=>{raw+=chunk;if(raw.length>32768){reject(new Error('Request too large'));req.destroy();}});req.on('end',()=>{try{resolve(JSON.parse(raw||'{}'));}catch{reject(new Error('Invalid JSON'));}});req.on('error',reject);});}
-function priceCart(lines,coupon){
+function priceCart(lines,coupon,stock=PRODUCTS_BY_ID){
   if(!Array.isArray(lines)||lines.length<1||lines.length>20)throw new Error('Your bag is empty or contains too many line items.');
   const productQuantities=new Map();
   const items=lines.map(line=>{
     const product=PRODUCTS_BY_ID[line?.id],qty=Number(line?.qty),size=String(line?.size||'');
     if(!product||!VALID_PRODUCT_SIZES.has(size)||!Number.isInteger(qty)||qty<1||qty>5)throw new Error('One of the items in your bag is invalid.');
     const productQuantity=(productQuantities.get(product.id)||0)+qty;
-    if(productQuantity>product.stock)throw new Error(`${product.name} has only ${product.stock} pieces available in this preview.`);
+    const available=Number(stock[product.id]??product.stock);if(available<1||productQuantity>available)throw new Error(available<1?`${product.name} is out of stock.`:`${product.name} has only ${available} pieces available.`);
     productQuantities.set(product.id,productQuantity);
     return {id:line.id,sku:product.sku,name:product.name,size,qty,unitPrice:product.price,lineTotal:product.price*qty};
   });
@@ -132,7 +132,11 @@ async function deleteAuthChallenge(email){
 }
 async function findStoreUser(email){if(databaseEnabled){const rows=await supabaseRequest('store_users',{params:{select:'id,name,email,salt,password_hash,created_at',email:`eq.${normalizeEmail(email)}`,limit:'1'}});return rows[0]||null;}return readPrivateList('users.json').find(user=>user.email===normalizeEmail(email))||null;}
 async function insertStoreUser(user){if(databaseEnabled){await supabaseRequest('store_users',{method:'POST',body:user,prefer:'return=minimal'});return;}const users=readPrivateList('users.json');users.push(user);writePrivateList('users.json',users);}
-async function getStoreOrders({email,id,limit}={}){if(databaseEnabled){const params={select:'id,customer_email,data,created_at',order:'created_at.desc',limit:String(limit||500)};if(email)params.customer_email=`eq.${normalizeEmail(email)}`;if(id)params.id=`eq.${id}`;const rows=await supabaseRequest('store_orders',{params});return rows.map(row=>row.data);}let rows=readPrivateList('orders.json');if(email)rows=rows.filter(order=>normalizeEmail(order.customer?.email)===normalizeEmail(email));if(id)rows=rows.filter(order=>order.id===id);return rows.slice(0,limit||500);}
+const INVENTORY_ROW_ID='__mlang_inventory__';
+function defaultStock(){return Object.fromEntries(Object.values(PRODUCTS_BY_ID).map(product=>[product.id,product.stock]));}
+async function getInventory(){if(databaseEnabled){const rows=await supabaseRequest('store_orders',{params:{select:'data',id:`eq.${INVENTORY_ROW_ID}`,limit:'1'}});const saved=rows[0]?.data?.stock;return {...defaultStock(),...(saved&&typeof saved==='object'?saved:{})};}try{const saved=JSON.parse(fs.readFileSync(path.join(PROJECT_ROOT,'data','inventory.json'),'utf8'));return {...defaultStock(),...(saved&&typeof saved==='object'?saved:{})};}catch{return defaultStock();}}
+async function saveInventory(stock,adminEmail){if(databaseEnabled){await supabaseRequest('store_orders',{method:'POST',params:{on_conflict:'id'},body:{id:INVENTORY_ROW_ID,customer_email:normalizeEmail(adminEmail),data:{type:'internal_inventory',stock},created_at:new Date().toISOString()},prefer:'resolution=merge-duplicates,return=minimal'});return;}writePrivateList('inventory.json',stock);}
+async function getStoreOrders({email,id,limit}={}){if(id===INVENTORY_ROW_ID)return [];if(databaseEnabled){const params={select:'id,customer_email,data,created_at',order:'created_at.desc',limit:String(limit||500),id:`neq.${INVENTORY_ROW_ID}`};if(email)params.customer_email=`eq.${normalizeEmail(email)}`;if(id)params.id=`eq.${id}`;const rows=await supabaseRequest('store_orders',{params});return rows.map(row=>row.data);}let rows=readPrivateList('orders.json').filter(order=>order.id!==INVENTORY_ROW_ID);if(email)rows=rows.filter(order=>normalizeEmail(order.customer?.email)===normalizeEmail(email));if(id)rows=rows.filter(order=>order.id===id);return rows.slice(0,limit||500);}
 async function updateOrderEmailStatus(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const saved=orders.find(item=>item.id===order.id);if(saved){saved.emailStatus=order.emailStatus;writePrivateList('orders.json',orders);}}
 async function updateStoreOrder(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const index=orders.findIndex(item=>item.id===order.id);if(index>=0){orders[index]=order;writePrivateList('orders.json',orders);}}
 function isAdmin(session){return Boolean(session&&adminEmails.has(normalizeEmail(session.email)));}
@@ -268,7 +272,7 @@ async function handleRequest(req,res){
     if(attempts.length>=12){send(res,429,{error:'Too many shipping checks. Wait a minute and try again.'});return;}
     attempts.push(now);shippingQuoteAttempts.set(ip,attempts);
     try{
-      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon),pincode=cleanField(body.pincode,6),paymentMethod=body.paymentMethod==='COD'?'COD':'Prepaid';
+      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon,await getInventory()),pincode=cleanField(body.pincode,6),paymentMethod=body.paymentMethod==='COD'?'COD':'Prepaid';
       send(res,200,{quote:await getShippingQuote({items:totals.items,coupon,pincode,paymentMethod,declaredValue:totals.subtotal-totals.discount+totals.gst})});
     }catch(error){send(res,400,{error:error.message||'Could not calculate shipping for this PIN code.'});}
     return;
@@ -288,6 +292,11 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/auth/logout'){const sessionToken=String(req.headers.cookie||'').split(';').map(part=>part.trim()).find(part=>part.startsWith('mlang_session='))?.slice('mlang_session='.length);if(sessionToken)sessions.delete(sessionToken);res.setHeader('Set-Cookie','mlang_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');send(res,200,{ok:true});return;}
   if(req.method==='GET'&&pathname==='/api/account/orders'){
     const session=sessionFor(req);if(!session){send(res,401,{error:'Please sign in to view your orders.'});return;}try{const orders=(await getStoreOrders({email:session.email,limit:200})).map(orderSummary);send(res,200,{orders});}catch(error){send(res,503,{error:error.message||'Could not load account orders.'});}return;
+  }
+  if(req.method==='GET'&&pathname==='/api/catalog'){try{send(res,200,{stocks:await getInventory()});}catch(error){send(res,503,{error:error.message||'Could not load product stock.'});}return;}
+  if(req.method==='PUT'&&pathname==='/api/admin/inventory'){
+    const session=sessionFor(req);if(!session||!isAdmin(session)){send(res,403,{error:'Admin access is required.'});return;}
+    try{const body=await readJson(req),stock=await getInventory();if(!body.stock||typeof body.stock!=='object'||Array.isArray(body.stock)){send(res,400,{error:'Provide stock counts for each product.'});return;}for(const [id,value] of Object.entries(body.stock)){if(!PRODUCTS_BY_ID[id]||!Number.isInteger(value)||value<0||value>999){send(res,400,{error:'Stock must be a whole number from 0 to 999 for a listed product.'});return;}stock[id]=value;}await saveInventory(stock,session.email);send(res,200,{stocks:stock});}catch(error){send(res,503,{error:error.message||'Could not save product stock.'});}return;
   }
   if(req.method==='GET'&&pathname==='/api/admin/orders'){
     const session=sessionFor(req);if(!session||!isAdmin(session)){send(res,403,{error:'Admin access is required.'});return;}try{const orders=(await getStoreOrders({limit:500})).map(order=>({...orderSummary(order),customer:order.customer||{},paymentId:order.paymentId||null,razorpayOrderId:order.razorpayOrderId||null}));send(res,200,{orders});}catch(error){send(res,503,{error:error.message||'Could not load store orders.'});}return;
@@ -322,7 +331,7 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/razorpay/orders'){
     if(!paymentsEnabled){send(res,503,{error:'Razorpay is not configured for this environment.'});return;}
     try{
-      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon);
+      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon,await getInventory());
       const customer=validateCustomer(body.customer);
       const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'Prepaid'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.gst+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store contact and exchange policy before placing your order.'});return;}
@@ -355,7 +364,7 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/orders/cod'){
     if(process.env.VERCEL==='1'&&!databaseEnabled){send(res,503,{error:'Connect Supabase before accepting COD orders on Vercel.'});return;}
     try{
-      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon);
+      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon,await getInventory());
       const customer=validateCustomer(body.customer);
       const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'COD'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.gst+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store policy before placing your order.'});return;}
