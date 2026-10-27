@@ -34,8 +34,8 @@ const packageDimensions={length:Number(process.env.SHIPROCKET_PACKAGE_LENGTH_CM)
 const gstRegistered=/^\d{2}[A-Z]{5}\d{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test((process.env.GSTIN||'').trim().toUpperCase());
 const shiprocketEnabled=Boolean(shiprocketEmail.includes('@')&&shiprocketPassword.length>8&&shiprocketPickup&&!/(replace|placeholder|example\.com)/i.test(`${shiprocketEmail} ${shiprocketPassword} ${shiprocketPickup}`)&&Object.values(packageDimensions).every(value=>Number.isFinite(value)&&value>0));
 const shiprocketBase='https://apiv2.shiprocket.in/v1/external';
-let shiprocketAuthCache={token:'',expiresAt:0};
-let shiprocketPickupPostcodeCache={value:'',expiresAt:0};
+let shiprocketAuthCache={token:'',expiresAt:0},shiprocketAuthPromise=null;
+let shiprocketPickupPostcodeCache={value:'',expiresAt:0},shiprocketPickupPostcodePromise=null;
 const resendApiKey=process.env.RESEND_API_KEY||'',emailFrom=process.env.EMAIL_FROM||'',publicStoreUrl=(process.env.PUBLIC_STORE_URL||(process.env.VERCEL_URL?`https://${process.env.VERCEL_URL}`:'http://127.0.0.1:4173')).replace(/\/$/,'');
 const emailEnabled=resendApiKey.startsWith('re_')&&emailFrom.includes('@')&&!/(replace|placeholder|your-domain|your-verified-domain|example\.com|localhost)/i.test(`${resendApiKey} ${emailFrom}`);
 const supabaseUrl=(process.env.SUPABASE_URL||'').replace(/\/$/,'');
@@ -164,11 +164,15 @@ function verifyAdminPassword(password,email=''){
 }
 async function shiprocketToken(){
   if(shiprocketAuthCache.token&&shiprocketAuthCache.expiresAt>Date.now())return shiprocketAuthCache.token;
-  const response=await fetch(`${shiprocketBase}/auth/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:shiprocketEmail,password:shiprocketPassword}),signal:AbortSignal.timeout(12000)});
-  const data=await response.json().catch(()=>({}));
-  if(!response.ok||!data.token)throw new Error('Shiprocket login failed. Check the API user email/password and account access.');
-  shiprocketAuthCache={token:data.token,expiresAt:Date.now()+8*24*60*60*1000};
-  return data.token;
+  if(!shiprocketAuthPromise)shiprocketAuthPromise=(async()=>{
+    const response=await fetch(`${shiprocketBase}/auth/login`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:shiprocketEmail,password:shiprocketPassword}),signal:AbortSignal.timeout(12000)});
+    const data=await response.json().catch(()=>({}));
+    if(!response.ok||!data.token)throw new Error('Shiprocket login failed. Check the API user email/password and account access.');
+    shiprocketAuthCache={token:data.token,expiresAt:Date.now()+8*24*60*60*1000};
+    return data.token;
+  })();
+  const pending=shiprocketAuthPromise;
+  try{return await pending;}finally{if(shiprocketAuthPromise===pending)shiprocketAuthPromise=null;}
 }
 async function shiprocketRequest(route,{method='GET',body}={}){
   const token=await shiprocketToken();
@@ -180,13 +184,17 @@ async function shiprocketRequest(route,{method='GET',body}={}){
 function packedWeight(items){return Math.round(packageDimensions.weight*items.reduce((sum,item)=>sum+item.qty,0)*1000)/1000;}
 async function shiprocketPickupPostcode(){
   if(shiprocketPickupPostcodeCache.value&&shiprocketPickupPostcodeCache.expiresAt>Date.now())return shiprocketPickupPostcodeCache.value;
-  const data=await shiprocketRequest('/settings/company/pickup');
-  const locations=data.data?.shipping_address||data.shipping_address||[];
-  const location=locations.find(item=>(item.pickup_location||item.name)===shiprocketPickup);
-  const postcode=String(location?.pin_code||location?.pincode||location?.pickup_pincode||'');
-  if(!/^\d{6}$/.test(postcode))throw new Error('Could not read the configured Shiprocket pickup PIN code. Check the active pickup location.');
-  shiprocketPickupPostcodeCache={value:postcode,expiresAt:Date.now()+10*60*1000};
-  return postcode;
+  if(!shiprocketPickupPostcodePromise)shiprocketPickupPostcodePromise=(async()=>{
+    const data=await shiprocketRequest('/settings/company/pickup');
+    const locations=data.data?.shipping_address||data.shipping_address||[];
+    const location=locations.find(item=>(item.pickup_location||item.name)===shiprocketPickup);
+    const postcode=String(location?.pin_code||location?.pincode||location?.pickup_pincode||'');
+    if(!/^\d{6}$/.test(postcode))throw new Error('Could not read the configured Shiprocket pickup PIN code. Check the active pickup location.');
+    shiprocketPickupPostcodeCache={value:postcode,expiresAt:Date.now()+10*60*1000};
+    return postcode;
+  })();
+  const pending=shiprocketPickupPostcodePromise;
+  try{return await pending;}finally{if(shiprocketPickupPostcodePromise===pending)shiprocketPickupPostcodePromise=null;}
 }
 function signShippingQuote(quote){
   const payload=Buffer.from(JSON.stringify(quote)).toString('base64url');
