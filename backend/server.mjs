@@ -64,12 +64,13 @@ function priceCart(lines,coupon,stock=PRODUCTS_BY_ID){
     return {id:line.id,sku:product.sku,name:product.name,size,qty,unitPrice:product.price,lineTotal:product.price*qty};
   });
   const subtotal=items.reduce((sum,item)=>sum+item.lineTotal,0);
-  const discount=coupon==='WELCOME10'?Math.round(subtotal*.1):0;
+  const discount=coupon?Math.round(subtotal*.1):0;
   const gst=gstRegistered?Math.round((subtotal-discount)*.05):0;
   const shipping=0;
   return {items,subtotal,discount,gst,shipping,total:subtotal-discount+gst+shipping};
 }
 function cleanField(value,max){return String(value??'').replace(/[\u0000-\u001f\u007f]/g,' ').trim().slice(0,max);}
+function normalizeCoupon(value){return cleanField(value,40).toUpperCase();}
 function validateCustomer(input){
   const customer={name:cleanField(input?.name,100),email:cleanField(input?.email,160),phone:cleanField(input?.phone,24),address:cleanField(input?.address,240),city:cleanField(input?.city,100),state:cleanField(input?.state,100),pincode:cleanField(input?.pincode,6),country:'India'};
   if(customer.name.length<2||!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(customer.email)||!/^[0-9+ ()-]{8,16}$/.test(customer.phone)||customer.address.length<5||customer.city.length<2||customer.state.length<2||!/^[0-9]{6}$/.test(customer.pincode))throw new Error('Please check your contact and delivery details.');
@@ -142,7 +143,7 @@ async function getStoreOrders({email,id,limit}={}){if(id===INVENTORY_ROW_ID)retu
 async function updateOrderEmailStatus(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const saved=orders.find(item=>item.id===order.id);if(saved){saved.emailStatus=order.emailStatus;writePrivateList('orders.json',orders);}}
 async function updateStoreOrder(order){if(databaseEnabled){await supabaseRequest('store_orders',{method:'PATCH',params:{id:`eq.${order.id}`},body:{data:order},prefer:'return=minimal'});return;}const orders=readPrivateList('orders.json');const index=orders.findIndex(item=>item.id===order.id);if(index>=0){orders[index]=order;writePrivateList('orders.json',orders);}}
 function isAdmin(session){return Boolean(session&&adminEmails.has(normalizeEmail(session.email)));}
-function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',subtotal:order.subtotal,discount:order.discount,gst:order.gst||0,total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null,charge:Number.isFinite(order.shippingCharge)?order.shippingCharge:null,courier:order.selectedCourierName||null},emailStatus:order.emailStatus||'unknown'};}
+function orderSummary(order){return {id:order.id,receipt:order.receipt,status:order.status,paymentMethod:order.paymentMethod||'Prepaid',coupon:order.coupon||null,subtotal:order.subtotal,discount:order.discount,gst:order.gst||0,total:order.total,createdAt:order.createdAt,itemCount:order.items?.reduce((sum,item)=>sum+item.qty,0)||0,items:(order.items||[]).map(item=>({name:item.name,sku:item.sku,size:item.size,qty:item.qty,unitPrice:item.unitPrice,lineTotal:item.lineTotal})),shipping:{status:order.shipping?.status||'pending',awb:order.shipping?.awb||null,message:order.shipping?.message||null,charge:Number.isFinite(order.shippingCharge)?order.shippingCharge:null,courier:order.selectedCourierName||null},emailStatus:order.emailStatus||'unknown'};}
 function htmlEscape(value){return String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));}
 async function sendEmail({to,subject,html,text}){
   if(!emailEnabled)return {status:'pending_setup'};
@@ -282,7 +283,7 @@ async function handleRequest(req,res){
     if(attempts.length>=12){send(res,429,{error:'Too many shipping checks. Wait a minute and try again.'});return;}
     attempts.push(now);shippingQuoteAttempts.set(ip,attempts);
     try{
-      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon,await getInventory()),pincode=cleanField(body.pincode,6),paymentMethod=body.paymentMethod==='COD'?'COD':'Prepaid';
+      const body=await readJson(req),coupon=normalizeCoupon(body.coupon),totals=priceCart(body.items,coupon,await getInventory()),pincode=cleanField(body.pincode,6),paymentMethod=body.paymentMethod==='COD'?'COD':'Prepaid';
       send(res,200,{quote:await getShippingQuote({items:totals.items,coupon,pincode,paymentMethod,declaredValue:totals.subtotal-totals.discount+totals.gst})});
     }catch(error){send(res,400,{error:error.message||'Could not calculate shipping for this PIN code.'});}
     return;
@@ -341,7 +342,7 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/razorpay/orders'){
     if(!paymentsEnabled){send(res,503,{error:'Razorpay is not configured for this environment.'});return;}
     try{
-      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon,await getInventory());
+      const body=await readJson(req),coupon=normalizeCoupon(body.coupon),totals=priceCart(body.items,coupon,await getInventory());
       const customer=validateCustomer(body.customer);
       const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'Prepaid'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.gst+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store contact and exchange policy before placing your order.'});return;}
@@ -349,7 +350,7 @@ async function handleRequest(req,res){
       const guest=session?null:(guestFor(req)||setGuestCookie(res));
       const receipt=`mlang_${crypto.randomUUID().replaceAll('-','').slice(0,24)}`;
       const remote=await razorpayRequest('POST','/orders',{amount:totals.total*100,currency:'INR',receipt,notes:{store:'MLANG',environment:razorpayMode}});
-      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,customer,ownerEmail:session?.email||normalizeEmail(customer.email),ownerId:session?.userId||guest.guestId,ownerType:session?'account':'guest',createdAt:new Date().toISOString()});
+      await savePendingPayment(remote.id,{receipt,razorpayOrderId:remote.id,...totals,coupon,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,customer,ownerEmail:session?.email||normalizeEmail(customer.email),ownerId:session?.userId||guest.guestId,ownerType:session?'account':'guest',createdAt:new Date().toISOString()});
       send(res,201,{keyId,orderId:remote.id,amount:remote.amount,currency:remote.currency,receipt,mode:razorpayMode});
     }catch(error){send(res,400,{error:error.message||'Could not create a payment order.'});}
     return;
@@ -364,7 +365,7 @@ async function handleRequest(req,res){
       const a=Buffer.from(expected),b=Buffer.from(signature);if(a.length!==b.length||!crypto.timingSafeEqual(a,b)){send(res,400,{error:'Razorpay payment signature did not verify.'});return;}
       const payment=await razorpayRequest('GET',`/payments/${encodeURIComponent(paymentId)}`);
       if(payment.order_id!==pending.razorpayOrderId||payment.amount!==pending.total*100||payment.currency!=='INR'||payment.status!=='captured'){send(res,409,{error:'Payment is not captured yet. Please wait and check your Razorpay dashboard.'});return;}
-      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,gst:pending.gst||0,shippingCharge:pending.shipping,selectedCourierId:pending.selectedCourierId,selectedCourierName:pending.selectedCourierName,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
+      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:pending.receipt,status:'paid',paymentMethod:'Prepaid',paymentId,razorpayOrderId:orderId,coupon:pending.coupon||null,items:pending.items,subtotal:pending.subtotal,discount:pending.discount,gst:pending.gst||0,shippingCharge:pending.shipping,selectedCourierId:pending.selectedCourierId,selectedCourierName:pending.selectedCourierName,shipping:pending.shipping,total:pending.total,currency:'INR',customer:pending.customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';await saveOrder(order);await deletePendingPayment(orderId);const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
       if(pending.ownerType==='guest')res.setHeader('Set-Cookie','mlang_guest=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0; Secure');
       send(res,200,{order:{id:order.id,receipt:order.receipt,status:order.status,total:order.total,gst:order.gst,itemCount:order.items.reduce((sum,item)=>sum+item.qty,0),shipping:order.shipping,emailStatus:order.emailStatus}});
@@ -374,14 +375,14 @@ async function handleRequest(req,res){
   if(req.method==='POST'&&pathname==='/api/orders/cod'){
     if(process.env.VERCEL==='1'&&!databaseEnabled){send(res,503,{error:'Connect Supabase before accepting COD orders on Vercel.'});return;}
     try{
-      const body=await readJson(req),coupon=body.coupon==='WELCOME10'?'WELCOME10':'',totals=priceCart(body.items,coupon,await getInventory());
+      const body=await readJson(req),coupon=normalizeCoupon(body.coupon),totals=priceCart(body.items,coupon,await getInventory());
       const customer=validateCustomer(body.customer);
       const quote=verifyShippingQuote(body.shippingQuote,{items:totals.items,coupon,pincode:customer.pincode,paymentMethod:'COD'});totals.shipping=quote.amount;totals.total=totals.subtotal-totals.discount+totals.gst+totals.shipping;
       if(body.policyAccepted!==true){send(res,400,{error:'Please acknowledge the store policy before placing your order.'});return;}
       const clientKey=crypto.createHash('sha256').update(`${normalizeEmail(customer.email)}|${customer.phone.replace(/\D/g,'')}`).digest('hex'),now=Date.now(),attempts=(codAttempts.get(clientKey)||[]).filter(time=>now-time<60*60*1000);
       if(attempts.length>=5){send(res,429,{error:'Too many COD orders from this connection. Please try again later.'});return;}
       attempts.push(now);codAttempts.set(clientKey,attempts);
-      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:`cod_${crypto.randomUUID().replaceAll('-','').slice(0,20)}`,status:'cod_ordered',paymentMethod:'COD',items:totals.items,subtotal:totals.subtotal,discount:totals.discount,gst:totals.gst,shippingCharge:totals.shipping,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,shipping:totals.shipping,total:totals.total,currency:'INR',customer,policyAccepted:true,createdAt:new Date().toISOString()};
+      const order={id:`ML-${Date.now().toString().slice(-8)}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`,receipt:`cod_${crypto.randomUUID().replaceAll('-','').slice(0,20)}`,status:'cod_ordered',paymentMethod:'COD',coupon:coupon||null,items:totals.items,subtotal:totals.subtotal,discount:totals.discount,gst:totals.gst,shippingCharge:totals.shipping,selectedCourierId:quote.courierId,selectedCourierName:quote.courierName,shipping:totals.shipping,total:totals.total,currency:'INR',customer,policyAccepted:true,createdAt:new Date().toISOString()};
       order.shipping=await bookShiprocket(order);order.emailStatus=emailEnabled?'pending':'pending_setup';
       await saveOrder(order);
       const emailResult=await sendOrderEmail(order);order.emailStatus=emailResult.status;try{await updateOrderEmailStatus(order);}catch(error){console.error('Could not update order email status:',error.message);}
